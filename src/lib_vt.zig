@@ -576,6 +576,8 @@ test {
     @import("std").testing.log_level = std.log.Level.err;
 
     _ = terminal;
+    // WraithTerm Phase 0.3 headless prototype.
+    _ = @import("terminal/headless_proto.zig");
     _ = @import("lib/main.zig");
     @import("std").testing.refAllDecls(input);
     @import("std").testing.refAllDecls(unicode);
