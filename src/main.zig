@@ -40,4 +40,5 @@ test {
     _ = @import("daemon/codec.zig");
     _ = @import("daemon/session.zig");
     _ = @import("daemon/pty.zig");
+    _ = @import("daemon/snapshot.zig");
 }
