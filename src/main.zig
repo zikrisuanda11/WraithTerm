@@ -37,4 +37,5 @@ test {
     _ = @import("quirks_memset.zig");
     // WraithTerm daemon.
     _ = @import("daemon/id.zig");
+    _ = @import("daemon/codec.zig");
 }

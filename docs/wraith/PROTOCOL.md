@@ -81,15 +81,16 @@ Perubahan terhadap `state_id` referensi (SSP; di lokal opsional).
 ```
 u32  base_state_id       // state yang diasumsikan dimiliki client
 u32  state_id            // state setelah diff diterapkan
-u16  span_count
 repeat span_count:
   u16 start_x
   u16 start_y
   u16 cell_count
+  u32 glyphs_len
+  u8  glyphs[glyphs_len]  // UTF-8, cell_count unit
   u32 style_data_len
-  u8  glyphs[...]        // UTF-8, cell_count unit
   u8  style_data[style_data_len]
-```
+(Koreksi P1.2: `glyphs_len u32` ditambahkan — tanpa panjang eksplisit,
+batas antara `glyphs` dan `style_data` tak dapat ditentukan saat decode.)
 Ack berbasis **nomor state**, bukan byte (D9, AC2.4). Client yang tak memiliki `base_state_id` mengabaikan diff dan meminta `Snapshot` baru.
 
 ### 4.4 `Input` (0x04)
