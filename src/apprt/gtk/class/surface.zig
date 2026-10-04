@@ -37,6 +37,8 @@ const InspectorWindow = @import("inspector_window.zig").InspectorWindow;
 const SplitTree = @import("split_tree.zig").SplitTree;
 const RenderSurface = @import("render_surface.zig").RenderSurface;
 const i18n = @import("../../../os/i18n.zig");
+const image_store = @import("../../../daemon/image_store.zig");
+const image_paste = @import("../../../daemon/image_paste.zig");
 const global = @import("../../../global.zig");
 const gtk_version = @import("../gtk_version.zig");
 const Overrides = @import("Overrides.zig");
@@ -4115,6 +4117,16 @@ const Clipboard = struct {
         if (state == .paste) {
             const formats = clipboard.getFormats();
             if (formats.containGtype(gobject.ext.types.string) == 0) {
+                // No text: with `wraith-image-paste` set and image data
+                // present (X11 + Wayland both expose it through the
+                // GTK clipboard), deliver the stored path instead (P3.3).
+                if (Clipboard.wraithImagePasteDir(self)) |_| {
+                    if (formats.containMimeType("image/png") != 0 or
+                        formats.containMimeType("image/jpeg") != 0)
+                    {
+                        return Clipboard.startImagePaste(self, clipboard, state);
+                    }
+                }
                 log.debug("clipboard has no text format, not starting paste request", .{});
                 return .unavailable;
             }
@@ -4354,6 +4366,152 @@ const Clipboard = struct {
         self: *Surface,
         state: apprt.ClipboardRequest,
     };
+
+    /// Configured image-paste dir (`wraith-image-paste`), or null when
+    /// off/unset. Namespaced here (not on Surface) to keep the core
+    /// widget small; takes the surface explicitly.
+    fn wraithImagePasteDir(self: *Surface) ?[]const u8 {
+        const cfg = self.private().config orelse return null;
+        return switch (cfg.get().@"wraith-image-paste") {
+            .off => null,
+            .path => |p| if (p.len > 0) p else null,
+        };
+    }
+
+    /// Start an image paste: read the clipboard texture, store it
+    /// managed (P3.1), and complete the request with the quoted path
+    /// as text so the stock bracketed-paste path frames it (P3.2).
+    fn startImagePaste(
+        self: *Surface,
+        clipboard: *gdk.Clipboard,
+        state: apprt.ClipboardRequest,
+    ) Allocator.Error!apprt.ClipboardReadResult {
+        const alloc = Application.default().allocator();
+        const ud = try alloc.create(Request);
+        errdefer alloc.destroy(ud);
+        ud.* = .{
+            .self = self.ref(),
+            .state = state,
+        };
+        errdefer self.unref();
+        clipboard.readTextureAsync(
+            null,
+            clipboardReadTexture,
+            ud,
+        );
+        return .started;
+    }
+
+    /// Store clipboard PNG bytes in the configured dir (created as
+    /// needed, pruned per D1) and return the owned absolute path.
+    fn storeImageBytes(
+        alloc: Allocator,
+        dir_path: []const u8,
+        data: []const u8,
+    ) ![]u8 {
+        const io = global.io();
+        try std.Io.Dir.cwd().createDirPath(io, dir_path);
+        var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{});
+        defer dir.close(io);
+        _ = image_store.prune(alloc, io, dir, @intCast(@max(
+            std.Io.Timestamp.now(io, .real).toNanoseconds(),
+            0,
+        ))) catch {};
+        const now_ms: i64 = @intCast(@divFloor(
+            std.Io.Timestamp.now(io, .real).toNanoseconds(),
+            std.time.ns_per_ms,
+        ));
+        var rand_buf: [3]u8 = undefined;
+        global.io().random(&rand_buf);
+        var rand_hex: [6]u8 = undefined;
+        _ = std.fmt.bufPrint(&rand_hex, "{x:0>2}{x:0>2}{x:0>2}", .{
+            rand_buf[0],
+            rand_buf[1],
+            rand_buf[2],
+        }) catch unreachable;
+        return image_store.store(alloc, io, dir, dir_path, now_ms, &rand_hex, data);
+    }
+
+    fn clipboardReadTexture(
+        source: ?*gobject.Object,
+        res: *gio.AsyncResult,
+        ud: ?*anyopaque,
+    ) callconv(.c) void {
+        const clipboard = gobject.ext.cast(
+            gdk.Clipboard,
+            source orelse return,
+        ) orelse return;
+        const req: *Request = @ptrCast(@alignCast(ud orelse return));
+
+        const alloc = Application.default().allocator();
+        defer alloc.destroy(req);
+
+        const self = req.self;
+        defer self.unref();
+
+        var gerr: ?*glib.Error = null;
+        const texture = clipboard.readTextureFinish(res, &gerr);
+        if (gerr) |err| {
+            defer err.free();
+            log.warn("failed to read clipboard texture err={s}", .{err.f_message orelse "(no message)"});
+            return;
+        }
+        const tex = texture orelse return;
+        defer tex.unref();
+        const png = tex.saveToPngBytes();
+        defer png.unref();
+        var size: usize = 0;
+        const data_ptr = png.getData(&size) orelse return;
+        const data = data_ptr[0..size];
+
+        const dir_path = wraithImagePasteDir(self) orelse return;
+        const stored = storeImageBytes(alloc, dir_path, data) catch |err| {
+            log.warn("failed to store pasted image err={}", .{err});
+            return;
+        };
+        defer alloc.free(stored);
+
+        var quoted_list: std.ArrayList(u8) = .empty;
+        defer quoted_list.deinit(alloc);
+        image_paste.quoteShell(stored, &quoted_list, alloc) catch |err| {
+            log.warn("failed to quote image path err={}", .{err});
+            return;
+        };
+        const quoted = quoted_list.toOwnedSliceSentinel(alloc, 0) catch |err| {
+            log.warn("failed to quote image path err={}", .{err});
+            return;
+        };
+        defer alloc.free(quoted);
+
+        const surface = self.private().core_surface orelse return;
+        surface.completeClipboardRequest(
+            req.state,
+            .{ .contents = &.{.{ .mime = "text/plain", .data = quoted }} },
+        ) catch |err| switch (err) {
+            error.UnsafePaste,
+            error.UnauthorizedPaste,
+            => {
+                showClipboardConfirmation(
+                    self,
+                    req.state,
+                    quoted,
+                );
+                return;
+            },
+
+            else => {
+                log.warn("failed to complete image paste request err={}", .{err});
+                return;
+            },
+        };
+
+        Surface.signals.@"clipboard-read".impl.emit(
+            self,
+            null,
+            .{},
+            null,
+        );
+    }
 };
 
 /// Compute a fraction [0.0, 1.0] from the supplied progress, which is clamped
