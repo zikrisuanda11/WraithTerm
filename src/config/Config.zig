@@ -3963,6 +3963,12 @@ term: []const u8 = "xterm-ghostty",
 /// control socket is missing, so the first command just works.
 @"wraith-daemon": WraithDaemon = .off,
 
+/// Predictive echo for high-latency remote sessions (D10).
+///
+/// `adaptive` predicts locally-typed printable input only when
+/// smoothed RTT exceeds 30 ms; `always`/`never` force the behavior.
+@"wraith-predictive-echo": WraithPredictiveEcho = .adaptive,
+
 /// Where pasted images are delivered (D1/P3.2).
 ///
 /// `off` keeps stock Ghostty behavior: image clipboard data is
@@ -5519,6 +5525,13 @@ pub const LinkPreviews = enum {
 pub const WraithDaemon = enum {
     off,
     auto,
+};
+
+// See `wraith-predictive-echo`
+pub const WraithPredictiveEcho = enum {
+    adaptive,
+    always,
+    never,
 };
 
 /// See `wraith-image-paste`
