@@ -61,4 +61,5 @@ test {
     _ = @import("daemon/ssp_sync.zig");
     _ = @import("daemon/ssp_roam.zig");
     _ = @import("daemon/ssp_predict.zig");
+    _ = @import("daemon/ssp_ext.zig");
 }
