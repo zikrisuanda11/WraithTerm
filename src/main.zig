@@ -52,4 +52,5 @@ test {
     _ = @import("daemon/harness_list.zig");
     _ = @import("daemon/harness_notify.zig");
     _ = @import("daemon/harness_tier3.zig");
+    _ = @import("daemon/image_store.zig");
 }
