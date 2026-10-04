@@ -68,3 +68,9 @@ Mode `wraith-predictive-echo = adaptive | always | never` (default `adaptive`: a
 - **Konteks:** `DISPLAY=:0` + `WAYLAND_DISPLAY=wayland-0` ada; uid 1000 (bukan root); `tc` ada tapi butuh root.
 - **Pilihan:** GUI mungkin bisa dibangun (`zig build`), tapi verifikasi runtime GUI/Linux clipboard tetap `[~]` bila tidak ada sesi interaktif yang bisa diverifikasi agent. Transport loss memakai `LossyLink` (P4.2), bukan `tc netem`.
 - **Alasan:** §2.5 menetapkan `LossyLink` sebagai metode uji resmi AC2.5.
+
+## ADR-003 — Build user-local tanpa root (blueprint-compiler + sysroot header devel) (2026-10-04)
+- **Konteks:** `zig build` gagal: `blueprint-compiler` tidak terpasang, dan header devel `adwaita.h` (libadwaita-devel), `gtk4-layer-shell.h`, serta `appstream.pc` (appstream-devel) tidak ada. §0.7 melarang `sudo`/ubah konfigurasi sistem.
+- **Pilihan:** (1) `pip3 install --user blueprint-compiler` (0.22.2, wheel murni Python) → `~/.local/bin`. (2) `dnf download --setopt=repo_gpgcheck=False --setopt=gpgcheck=False` RPM devel (x86_64) lalu ekstrak ke sysroot privat `~/.local/wraith-sysroot` via `rpm2cpio | cpio -idm` (tanpa instalasi). (3) `.pc` di sysroot ditulis ulang ke path sysroot; symlink `.so` dev diarahkan ke `lib*.so.0` sistem. (4) env `PKG_CONFIG_PATH` + `LIBRARY_PATH` di-set saat build. Semua dibungkus `docs/wraith/build-env.sh` (idempoten, `--setup`).
+- **Alasan:** satu-satunya jalur memenuhi §0.7 (tanpa root) sambil membuat build hijau; reversible (hapus `~/.local/wraith-sysroot` + `pip3 uninstall`). Downside: environment build tidak standar — dicatat di PROGRESS.md & BASELINE.md, dan tidak ada artefak sysroot yang di-commit (hanya skrip setup).
+- **Hasil:** `zig build` **hijau** → `zig-out/bin/ghostty` (`Ghostty 1.3.2-wraith-phase0-recon`).

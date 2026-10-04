@@ -7,9 +7,11 @@ Status: `[ ]` belum · `[x]` selesai · `[~]` DONE-UNVERIFIED (lihat NEEDS_HUMAN
 Aturan iterasi: kerjakan SATU task `[ ]` pertama (dari atas) yang seluruh dependensinya sudah `[x]`/`[~]`/`[!]`. Implementasi → `zig build` → test → debug → commit (branch != main) → update berkas ini.
 
 ## Environment notes (dibaca tiap iterasi)
-- Zig TIDAK terpasang di system PATH. Toolchain user-local di `~/.local/opt/zig/zig` (0.16.0, sesuai `build.zig.zon` `minimum_zig_version`). Pakai `export PATH="$HOME/.local/opt/zig:$PATH"` sebelum `zig build`.
-- `bun` ada (`~/.bun/bin/bun`), `omp` ada (`~/.bun/bin/omp`). `nix` tidak ada. Ada display X11 (`:0`) + Wayland. uid 1000 (bukan root) → `tc netem` tidak dipakai; pakai `LossyLink`.
+- Zig TIDAK terpasang di system PATH. Toolchain user-local di `~/.local/opt/zig/zig` (0.16.0, sesuai `build.zig.zon` `minimum_zig_version`).
+- **WAJIB: `source docs/wraith/build-env.sh` sebelum SETIAP `zig build`/`zig build test`.** Skrip men-set `PATH` (zig + `~/.local/bin`), `PKG_CONFIG_PATH`, `LIBRARY_PATH`. Setup lengkap: `docs/wraith/build-env.sh --setup` (idempoten). Latar: ADR-003 (blueprint-compiler via pip `--user`; header devel dari RPM diekstrak ke `~/.local/wraith-sysroot`; tanpa root).
+- `bun` ada (`~/.bun/bin/bun`), `omp` ada (`~/.bun/bin/omp`, v18.4.0). `nix` tidak ada. Ada display X11 (`:0`) + Wayland. uid 1000 (bukan root) → `tc netem` tidak dipakai; pakai `LossyLink`.
 - Remote `upstream` (ghostty) sudah ditambahkan (read-only ref, D7).
+- **`zig build` sudah TERVERIFIKASI hijau** (2026-10-04) → `zig-out/bin/ghostty` = `Ghostty 1.3.2-wraith-phase0-recon`.
 
 ## Phase 0 — Recon & Fondasi
 - [x] **P0.1** Buat branch `wraith/dev` dari `main`, lalu `wraith/phase0-recon`. Baca dokumen §0 poin 2. Buat `docs/wraith/PROGRESS.md` dan `DECISIONS.md` (salin §3). *Selesai bila:* kedua berkas ada dan ter-commit.
