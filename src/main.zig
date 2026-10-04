@@ -59,4 +59,5 @@ test {
     _ = @import("daemon/ssp_frag.zig");
     _ = @import("daemon/ssp_bootstrap.zig");
     _ = @import("daemon/ssp_sync.zig");
+    _ = @import("daemon/ssp_roam.zig");
 }
