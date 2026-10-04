@@ -19,7 +19,7 @@ Aturan iterasi: kerjakan SATU task `[ ]` pertama (dari atas) yang seluruh depend
 - [x] **P0.3** ← P0.2. Evaluasi `libghostty-vt` untuk dipakai headless; putuskan sesuai §5 prinsip; buat prototipe kecil (test) yang memberi makan byte ke terminal headless dan membaca grid layar. *Selesai bila:* test prototipe lulus dan keputusan tercatat.
 - [x] **P0.4** ← P0.2. Tulis `PROTOCOL.md` final berdasarkan D3, D9, D10 (layout byte tiap pesan, state machine handshake, model ancaman). *Selesai bila:* semua tipe pesan D9 terdefinisi lengkap.
 - [ ] **P0.5** ← P0.2. Jalankan `zig build` dan seluruh test suite baseline + benchmark yang ada; catat hasil di `BASELINE.md`; catat basis upstream di `UPSTREAM.md` (D7). *Selesai bila:* kedua berkas berisi angka/hash nyata.
-- [ ] **P0.6** ← P0.1. Rancang test `LossyLink` secara tertulis di `ARCHITECTURE.md` (antarmuka transport yang bisa diganti, parameter loss/delay/dup/reorder, PRNG ber-seed). *Selesai bila:* antarmuka terdokumentasi.
+- [x] **P0.6** ← P0.1. Rancang test `LossyLink` secara tertulis di `ARCHITECTURE.md` (antarmuka transport yang bisa diganti, parameter loss/delay/dup/reorder, PRNG ber-seed). *Selesai bila:* antarmuka terdokumentasi.
 - **Phase gate P0:** build hijau, berkas docs ada, tidak ada perubahan fungsional. Merge ke `wraith/dev`.
 
 ## Phase 1 — Daemon + Attach/Detach (Pilar 1)
