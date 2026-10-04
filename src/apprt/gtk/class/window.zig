@@ -28,6 +28,7 @@ const Surface = @import("surface.zig").Surface;
 const Tab = @import("tab.zig").Tab;
 const DebugWarning = @import("debug_warning.zig").DebugWarning;
 const CommandPalette = @import("command_palette.zig").CommandPalette;
+const HarnessHud = @import("harness_hud.zig");
 const WeakRef = @import("../weak_ref.zig").WeakRef;
 const TitleDialog = @import("title_dialog.zig").TitleDialog;
 const Overrides = @import("Overrides.zig");
@@ -399,6 +400,7 @@ pub const Window = extern struct {
             .init("clear", actionClear, null),
             // TODO: accept the surface that toggled the command palette
             .init("toggle-command-palette", actionToggleCommandPalette, null),
+            .init("toggle-harness-hud", actionToggleHarnessHud, null),
             .init("toggle-inspector", actionToggleInspector, null),
         };
 
@@ -2284,6 +2286,72 @@ pub const Window = extern struct {
         // TODO: accept the surface that toggled the command palette as a
         // parameter
         self.toggleCommandPalette();
+    }
+
+    /// React to a GTK action requesting the WraithTerm harness HUD.
+    fn actionToggleHarnessHud(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Window,
+    ) callconv(.c) void {
+        self.toggleHarnessHud();
+    }
+
+    /// Show the WraithTerm harness HUD: query the daemon for the
+    /// merged Tier 1 + Tier 2 view and present it. Linux-only data
+    /// path (the daemon client is Linux-only in v1); elsewhere the
+    /// dialog opens empty. Daemon errors degrade to the empty state,
+    /// never to a crash.
+    fn toggleHarnessHud(self: *Window) void {
+        if (comptime @import("builtin").os.tag != .linux) {
+            HarnessHud.present(self.as(gtk.Window), &.{});
+            return;
+        }
+        const rows = queryHarnessRows() catch {
+            HarnessHud.present(self.as(gtk.Window), &.{});
+            return;
+        };
+        defer Application.default().allocator().free(rows);
+        HarnessHud.present(self.as(gtk.Window), rows);
+    }
+
+    /// Query the daemon control socket for the merged harness view.
+    /// Linux-only (the daemon client uses raw Linux syscalls in v1).
+    /// Caller owns the returned rows.
+    fn queryHarnessRows() ![]@import("../../../daemon/harness_list.zig").HarnessRow {
+        const Client = @import("../../../daemon/client.zig").Client;
+        const sock = @import("../../../daemon/socket.zig");
+        const hevent = @import("../../../daemon/harness_event.zig");
+        const hlist = @import("../../../daemon/harness_list.zig");
+        const SessionId = @import("../../../daemon/id.zig").SessionId;
+        const global = @import("../../../global.zig");
+        const alloc = Application.default().allocator();
+        const path = try sock.socketPath(alloc, global.environ());
+        defer alloc.free(path);
+        var cli = Client.connect(alloc, path) catch return error.DaemonUnreachable;
+        defer cli.deinit();
+        cli.helloCli("") catch return error.DaemonUnreachable;
+        const entries = cli.queryHarnesses() catch return error.DaemonUnreachable;
+        defer alloc.free(entries);
+        const rows = try alloc.alloc(hlist.HarnessRow, entries.len);
+        errdefer alloc.free(rows);
+        for (entries, 0..) |*e, i| {
+            var tmp: SessionId = undefined;
+            @memcpy(&tmp.bytes, &e.id);
+            var hex: [SessionId.len]u8 = undefined;
+            const id_str = tmp.toString(&hex);
+            var id: [8]u8 = undefined;
+            @memcpy(&id, id_str);
+            rows[i] = .{
+                .id = id,
+                .tier1 = hevent.State.fromOrdinal(e.tier1) orelse .unknown,
+                .tier2 = e.tier2 != 0,
+            };
+            if (e.tool_len > 0) {
+                rows[i].tool = e.tool[0..@min(e.tool_len, 32)];
+            }
+        }
+        return rows;
     }
 
     /// Toggle the Ghostty inspector for the active surface.

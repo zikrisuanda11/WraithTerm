@@ -899,6 +899,10 @@ pub const Surface = extern struct {
         return self.as(gtk.Widget).activateAction("win.toggle-command-palette", null) != 0;
     }
 
+    pub fn toggleHarnessHud(self: *Self) bool {
+        return self.as(gtk.Widget).activateAction("win.toggle-harness-hud", null) != 0;
+    }
+
     pub fn controlInspector(
         self: *Self,
         value: apprt.Action.Value(.inspector),
