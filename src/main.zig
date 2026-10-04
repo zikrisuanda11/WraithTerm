@@ -41,4 +41,5 @@ test {
     _ = @import("daemon/session.zig");
     _ = @import("daemon/pty.zig");
     _ = @import("daemon/snapshot.zig");
+    _ = @import("daemon/socket.zig");
 }
