@@ -24,7 +24,7 @@ Aturan iterasi: kerjakan SATU task `[ ]` pertama (dari atas) yang seluruh depend
 - **Phase gate P0:** build hijau, berkas docs ada, tidak ada perubahan fungsional. Merge ke `wraith/dev`.
 
 ## Phase 1 — Daemon + Attach/Detach (Pilar 1)
-- [~] **P1.1** ← P0.* CLI skeleton semua aksi baru (D8) sebagai stub yang mencetak "not implemented" dan exit code non-zero. *Selesai bila:* `--help`/parsing aksi berfungsi, test parsing lulus. *(sebagian: `SessionId` selesai + teruji; skeleton aksi CLI belum)*
+- [x] **P1.1** ← P0.* CLI skeleton semua aksi baru (D8) sebagai stub yang mencetak "not implemented" dan exit code non-zero. *Selesai bila:* `--help`/parsing aksi berfungsi, test parsing lulus. *(selesai 2026-10-05: 9 stub `src/cli/{daemon,attach,list_sessions,kill,remote,remote_server,list_harnesses,install_omp_bridge,uninstall_omp_bridge}.zig` + wiring `Action`/runMain/options + test `parse wraith actions` OK; smoke 9 aksi exit=1 + `--help` exit=0; `@setEvalBranchQuota(100k)` di `Action.file()` karena 9 nama baru menjebol kuota comptime helpgen)*
 - [ ] **P1.2** ← P0.4 Codec pesan (encode/decode semua tipe D9) dengan unit test termasuk kasus malformed/oversize/versi salah. *Selesai bila:* round-trip test + negative test lulus.
 - [ ] **P1.3** ← P1.2 Session manager (create/list/kill, ID D8, batas memori scrollback). *Selesai bila:* unit test lulus.
 - [ ] **P1.4** ← P0.3, P1.3 Daemon memiliki PTY + child (spawn, resize, baca output ke state headless; tidak ada SIGHUP saat client lepas). *Selesai bila:* test integrasi: spawn `sh -c 'sleep 30'`, putus client, proses tetap hidup.

@@ -23,6 +23,15 @@ const boo = @import("boo.zig");
 const new_window = @import("new_window.zig");
 const new_tab = @import("new_tab.zig");
 const toggle_quick_terminal = @import("toggle_quick_terminal.zig");
+const daemon = @import("daemon.zig");
+const attach = @import("attach.zig");
+const list_sessions = @import("list_sessions.zig");
+const kill_session = @import("kill.zig");
+const remote = @import("remote.zig");
+const remote_server = @import("remote_server.zig");
+const list_harnesses = @import("list_harnesses.zig");
+const install_omp_bridge = @import("install_omp_bridge.zig");
+const uninstall_omp_bridge = @import("uninstall_omp_bridge.zig");
 const global = @import("../global.zig");
 
 /// Special commands that can be invoked via CLI flags. These are all
@@ -85,6 +94,33 @@ pub const Action = enum {
 
     // Use IPC to tell the running Ghostty to toggle the quick terminal.
     @"toggle-quick-terminal",
+
+    // WraithTerm daemon: own PTY + child, survive client detach (P1).
+    daemon,
+
+    // WraithTerm: attach to a daemon session.
+    attach,
+
+    // WraithTerm: list daemon sessions.
+    @"list-sessions",
+
+    // WraithTerm: kill a daemon session.
+    kill,
+
+    // WraithTerm: connect to a remote session (SSP).
+    remote,
+
+    // WraithTerm: serve a remote session (SSP server side).
+    @"remote-server",
+
+    // WraithTerm: list harness (agent) sessions.
+    @"list-harnesses",
+
+    // WraithTerm: install the omp bridge extension.
+    @"install-omp-bridge",
+
+    // WraithTerm: uninstall the omp bridge extension.
+    @"uninstall-omp-bridge",
 
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {
         // If we see a "-e" and we haven't seen a command yet, then
@@ -171,6 +207,15 @@ pub const Action = enum {
             .@"new-window" => try new_window.run(alloc),
             .@"new-tab" => try new_tab.run(alloc),
             .@"toggle-quick-terminal" => try toggle_quick_terminal.run(alloc),
+            .daemon => try daemon.run(alloc),
+            .attach => try attach.run(alloc),
+            .@"list-sessions" => try list_sessions.run(alloc),
+            .kill => try kill_session.run(alloc),
+            .remote => try remote.run(alloc),
+            .@"remote-server" => try remote_server.run(alloc),
+            .@"list-harnesses" => try list_harnesses.run(alloc),
+            .@"install-omp-bridge" => try install_omp_bridge.run(alloc),
+            .@"uninstall-omp-bridge" => try uninstall_omp_bridge.run(alloc),
         };
     }
 
@@ -178,6 +223,9 @@ pub const Action = enum {
     /// path from the root src/ directory.
     pub fn file(comptime self: Action) []const u8 {
         comptime {
+            // The 9 extra WraithTerm actions push the branch count of the
+            // helpgen inline-for over the default quota.
+            @setEvalBranchQuota(100_000);
             const filename = filename: {
                 const tag = @tagName(self);
                 var filename: [tag.len]u8 = undefined;
@@ -214,6 +262,15 @@ pub const Action = enum {
                 .@"new-window" => new_window.Options,
                 .@"new-tab" => new_tab.Options,
                 .@"toggle-quick-terminal" => toggle_quick_terminal.Options,
+                .daemon => daemon.Options,
+                .attach => attach.Options,
+                .@"list-sessions" => list_sessions.Options,
+                .kill => kill_session.Options,
+                .remote => remote.Options,
+                .@"remote-server" => remote_server.Options,
+                .@"list-harnesses" => list_harnesses.Options,
+                .@"install-omp-bridge" => install_omp_bridge.Options,
+                .@"uninstall-omp-bridge" => uninstall_omp_bridge.Options,
             };
         }
     }
@@ -326,5 +383,32 @@ test "parse action plus ignores -e" {
             actionpkg.DetectError.MultipleActions,
             actionpkg.detectIter(Action, &iter),
         );
+    }
+}
+
+test "parse wraith actions" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Every new WraithTerm action must be detectable via its `+` flag,
+    // in any position, without disturbing other flags.
+    inline for (.{
+        .{ "+daemon", Action.daemon },
+        .{ "+attach", Action.attach },
+        .{ "+list-sessions", Action.@"list-sessions" },
+        .{ "+kill", Action.kill },
+        .{ "+remote", Action.remote },
+        .{ "+remote-server", Action.@"remote-server" },
+        .{ "+list-harnesses", Action.@"list-harnesses" },
+        .{ "+install-omp-bridge", Action.@"install-omp-bridge" },
+        .{ "+uninstall-omp-bridge", Action.@"uninstall-omp-bridge" },
+    }) |case| {
+        var iter = try std.process.Args.IteratorGeneral(.{}).init(
+            alloc,
+            "--a=42 " ++ case[0],
+        );
+        defer iter.deinit();
+        const action = try actionpkg.detectIter(Action, &iter);
+        try testing.expect(action.? == case[1]);
     }
 }
