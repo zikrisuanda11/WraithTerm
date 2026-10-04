@@ -57,4 +57,5 @@ test {
     _ = @import("daemon/ssp_crypto.zig");
     _ = @import("daemon/ssp_link.zig");
     _ = @import("daemon/ssp_frag.zig");
+    _ = @import("daemon/ssp_bootstrap.zig");
 }
