@@ -35,4 +35,6 @@ test {
     std.testing.log_level = std.log.Level.err;
     _ = entrypoint;
     _ = @import("quirks_memset.zig");
+    // WraithTerm daemon.
+    _ = @import("daemon/id.zig");
 }
