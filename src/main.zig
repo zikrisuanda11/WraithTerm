@@ -55,4 +55,6 @@ test {
     _ = @import("daemon/image_store.zig");
     _ = @import("daemon/image_paste.zig");
     _ = @import("daemon/ssp_crypto.zig");
+    _ = @import("daemon/ssp_link.zig");
+    _ = @import("daemon/ssp_frag.zig");
 }
