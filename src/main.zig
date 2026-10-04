@@ -45,4 +45,5 @@ test {
     _ = @import("daemon/server.zig");
     _ = @import("daemon/client.zig");
     _ = @import("daemon/harness_detect.zig");
+    _ = @import("daemon/harness_event.zig");
 }
