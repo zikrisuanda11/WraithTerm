@@ -18,6 +18,24 @@ pub const Mode = enum {
     path,
 };
 
+/// Image MIME types a paste may carry (clipboard + DnD).
+pub const image_mimes = [_][]const u8{ "image/png", "image/jpeg" };
+
+/// First image content in a clipboard result, or null when text is
+/// present (text wins, matching every platform path) or no image
+/// data exists. Pure: unit-tested with fixtures.
+pub fn findImageData(contents: []const @import("../terminal/clipboard.zig").Content) ?@import("../terminal/clipboard.zig").Content {
+    for (contents) |c| {
+        if (std.mem.eql(u8, c.mime, "text/plain")) return null;
+    }
+    for (contents) |c| {
+        for (image_mimes) |m| {
+            if (std.mem.eql(u8, c.mime, m)) return c;
+        }
+    }
+    return null;
+}
+
 /// Shell-quote `path` for POSIX shells (D1): bare when it contains
 /// only safe chars, otherwise single-quoted with embedded quotes as
 /// `'\''`. Never emits escapes the shell would reinterpret.
@@ -142,4 +160,21 @@ test "deliver: plain text path unaffected (AC3.3)" {
     defer expect.deinit(alloc);
     for (parts) |p| try expect.appendSlice(alloc, p);
     try testing.expectEqualStrings(expect.items, via_deliver);
+}
+
+test "findImageData: text wins, else first image, else null" {
+    const testing = std.testing;
+    const Content = @import("../terminal/clipboard.zig").Content;
+    const png = Content{ .mime = "image/png", .data = "\x89PNG" };
+    const jpg = Content{ .mime = "image/jpeg", .data = "\xFF\xD8" };
+    const txt = Content{ .mime = "text/plain", .data = "hi" };
+    // Image-only: first image wins.
+    const only = findImageData(&.{ jpg, png }) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(jpg, only);
+    // Text present: no image delivery (stock text path handles it).
+    try testing.expect(findImageData(&.{ png, txt }) == null);
+    try testing.expect(findImageData(&.{txt}) == null);
+    // Nothing usable: null.
+    try testing.expect(findImageData(&.{}) == null);
+    try testing.expect(findImageData(&.{Content{ .mime = "text/html", .data = "<b>" }}) == null);
 }

@@ -12,6 +12,8 @@ const objc = @import("objc");
 const apprt = @import("../apprt.zig");
 const font = @import("../font/main.zig");
 const global = @import("../global.zig");
+const image_store = @import("../daemon/image_store.zig");
+const image_paste = @import("../daemon/image_paste.zig");
 const input = @import("../input.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
@@ -746,7 +748,23 @@ pub const Surface = struct {
         // know about them.
         var mimes_buf: [terminal.kitty.clipboard.max_read_mimes][*:0]const u8 = undefined;
         const mimes: []const [*:0]const u8 = switch (state) {
-            .paste, .osc_52_read => &.{"text/plain"},
+            .paste, .osc_52_read => paste_mimes: {
+                // macOS (P3.4): with `wraith-image-paste` set, also ask
+                // for image bytes so a pure-image pasteboard can be
+                // stored + path-delivered below. Other platforms keep
+                // the stock text-only request.
+                if (state == .paste and
+                    comptime builtin.os.tag == .macos and
+                        imagePasteEnabled(self))
+                {
+                    break :paste_mimes &.{
+                        "text/plain",
+                        "image/png",
+                        "image/jpeg",
+                    };
+                }
+                break :paste_mimes &.{"text/plain"};
+            },
 
             // A mode 5522 paste event only lists types and must not read
             // any clipboard data.
@@ -862,6 +880,52 @@ pub const Surface = struct {
         alloc.destroy(state);
     }
 
+    /// macOS (P3.4): image-paste enabled when `wraith-image-paste`
+    /// names a directory.
+    fn imagePasteEnabled(self: *Surface) bool {
+        return switch (self.app.config.@"wraith-image-paste") {
+            .off => false,
+            .path => |p| p.len > 0,
+        };
+    }
+
+    /// macOS (P3.4): store clipboard image bytes in the configured
+    /// dir (`~/Library/Caches/wraith/paste`, D1) and return the owned
+    /// absolute path. Best-effort prune per D1.
+    fn storeClipboardImage(self: *Surface, data: []const u8) ![]u8 {
+        const alloc = self.app.core_app.alloc;
+        const io = global.io();
+        var env_map = try global.environMap();
+        defer env_map.deinit();
+        const home = env_map.get("HOME") orelse return error.NoHome;
+        const dir_path = try std.fs.path.join(
+            alloc,
+            &.{ home, "Library/Caches/wraith/paste" },
+        );
+        defer alloc.free(dir_path);
+        try std.Io.Dir.cwd().createDirPath(io, dir_path);
+        var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{});
+        defer dir.close(io);
+        try dir.setPermissions(io, .fromMode(0o700));
+        _ = image_store.prune(alloc, io, dir, @intCast(@max(
+            std.Io.Timestamp.now(io, .real).toNanoseconds(),
+            0,
+        ))) catch {};
+        const now_ms: i64 = @intCast(@divFloor(
+            std.Io.Timestamp.now(io, .real).toNanoseconds(),
+            std.time.ns_per_ms,
+        ));
+        var rand_buf: [3]u8 = undefined;
+        io.random(&rand_buf);
+        var rand_hex: [6]u8 = undefined;
+        _ = std.fmt.bufPrint(&rand_hex, "{x:0>2}{x:0>2}{x:0>2}", .{
+            rand_buf[0],
+            rand_buf[1],
+            rand_buf[2],
+        }) catch unreachable;
+        return image_store.store(alloc, io, dir, dir_path, now_ms, &rand_hex, data);
+    }
+
     fn completeClipboardRequest(
         self: *Surface,
         complete: *const CAPI.ClipboardComplete,
@@ -907,8 +971,34 @@ pub const Surface = struct {
 
         // Attempt to complete the request, but we may request
         // confirmation.
+        //
+        // macOS (P3.4): a pure-image paste becomes the stored quoted
+        // path as text, so the stock bracketed-paste path frames it.
+        var owned_quoted: ?[]u8 = null;
+        defer if (owned_quoted) |p| alloc.free(p);
+        var eff_contents = contents;
+        if (state.* == .paste and comptime builtin.os.tag == .macos) {
+            if (image_paste.findImageData(contents)) |img| {
+                if (storeClipboardImage(self, img.data)) |sp| {
+                    defer alloc.free(sp);
+                    var quoted: std.ArrayList(u8) = .empty;
+                    defer quoted.deinit(alloc);
+                    image_paste.quoteShell(sp, &quoted, alloc) catch {};
+                    if (quoted.items.len > 0) {
+                        const sub = conv_alloc.alloc(terminal.clipboard.Content, 1) catch null;
+                        if (sub) |s| {
+                            if (alloc.dupe(u8, quoted.items)) |q| {
+                                owned_quoted = q;
+                                s[0] = .{ .mime = "text/plain", .data = q };
+                                eff_contents = s;
+                            } else |_| {}
+                        }
+                    }
+                } else |_| {}
+            }
+        }
         self.core_surface.completeClipboardRequest(state.*, .{
-            .contents = contents,
+            .contents = eff_contents,
             .available = available,
             .confirmed = complete.confirmed,
             .remember = complete.remember,
