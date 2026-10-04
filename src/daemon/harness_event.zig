@@ -32,6 +32,13 @@ pub const State = enum {
         if (std.mem.eql(u8, s, "unknown")) return .unknown;
         return null;
     }
+
+    /// Wire ordinal from `codec.HarnessListEntry.tier1`
+    /// (`@intFromEnum` order). Unknown values map to null (the
+    /// caller renders them, never crashes on them).
+    pub fn fromOrdinal(v: u8) ?State {
+        return std.enums.fromInt(State, v);
+    }
 };
 
 /// A decoded state event. `tool` is borrowed from the parse arena

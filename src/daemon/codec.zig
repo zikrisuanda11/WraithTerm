@@ -32,6 +32,7 @@ pub const Type = enum(u8) {
     image_chunk = 0x09,
     ack = 0x0A,
     session_list = 0x0B,
+    harness_list = 0x0C,
     @"error" = 0x7F,
 };
 
@@ -139,6 +140,7 @@ pub const ControlCommand = enum(u8) {
     kill_session = 0x04,
     list_sessions = 0x05,
     exit_when_empty = 0x06,
+    query_harnesses = 0x07,
 };
 
 pub const Control = struct {
@@ -199,6 +201,30 @@ pub const SessionList = struct {
     entries: []const SessionListEntry,
 };
 
+/// Fixed tool-name capacity per harness entry (truncated by the
+/// server, documented).
+pub const max_tool_len: usize = 32;
+
+/// One row of a `HarnessList` reply: raw session id, Tier 1 state
+/// (`harness_event.State` ordinal via `@intFromEnum`: 0=idle,
+/// 1=thinking, 2=executing_tool, 3=awaiting_approval, 4=error,
+/// 5=unknown), Tier 2 detection flag, and the Tier 1 tool name
+/// (`tool[0..tool_len]`, remainder zeroed).
+pub const HarnessListEntry = struct {
+    id: [4]u8,
+    tier1: u8,
+    tier2: u8,
+    tool_len: u8,
+    tool: [max_tool_len]u8 = .{0} ** max_tool_len,
+};
+
+/// Reply to `Control{query_harnesses}`: `u16 count` followed by
+/// `count` fixed entries of `[4]id + [1]tier1 + [1]tier2 +
+/// [1]tool_len + [32]tool`.
+pub const HarnessList = struct {
+    entries: []const HarnessListEntry,
+};
+
 pub const ErrorMsg = struct {
     code: ErrorCode,
     /// Human-readable UTF-8. MUST NOT carry screen/input/key material.
@@ -217,10 +243,14 @@ pub const Message = union(Type) {
     image_chunk: ImageChunk,
     ack: Ack,
     session_list: SessionList,
+    harness_list: HarnessList,
     @"error": ErrorMsg,
 };
 
 const frame_header_len = 4 + 1 + 1;
+
+/// Fixed wire size of one `HarnessListEntry`.
+pub const harness_entry_len: usize = 4 + 1 + 1 + 1 + max_tool_len;
 
 fn payloadLen(msg: Message) usize {
     return switch (msg) {
@@ -241,6 +271,7 @@ fn payloadLen(msg: Message) usize {
         .image_chunk => |m| 2 + 2 + 2 + 1 + 4 + m.data.len,
         .ack => 4 + 2 + 2,
         .session_list => |m| 2 + 5 * m.entries.len,
+        .harness_list => |m| 2 + harness_entry_len * m.entries.len,
         .@"error" => |m| 1 + 2 + m.message.len,
     };
 }
@@ -403,6 +434,22 @@ pub fn encode(alloc: Allocator, msg: Message) Allocator.Error![]u8 {
                 off += 4;
                 out[off] = e.state;
                 off += 1;
+            }
+        },
+        .harness_list => |m| {
+            writeU16(out, off, @intCast(m.entries.len));
+            off += 2;
+            for (m.entries) |e| {
+                @memcpy(out[off..][0..4], &e.id);
+                off += 4;
+                out[off] = e.tier1;
+                off += 1;
+                out[off] = e.tier2;
+                off += 1;
+                out[off] = e.tool_len;
+                off += 1;
+                @memcpy(out[off..][0..max_tool_len], &e.tool);
+                off += max_tool_len;
             }
         },
         .@"error" => |m| {
@@ -611,6 +658,12 @@ pub fn decode(buf: []const u8) DecodeError!Message {
             if (r.rest() != 0) return error.Malformed;
             return .{ .session_list = .{ .entries = &.{} } };
         },
+        .harness_list => {
+            const count = try r.readU16();
+            if (count != 0) return error.Malformed;
+            if (r.rest() != 0) return error.Malformed;
+            return .{ .harness_list = .{ .entries = &.{} } };
+        },
         .@"error" => {
             const code = std.enums.fromInt(ErrorCode, try r.readByte()) orelse
                 return error.Malformed;
@@ -622,13 +675,14 @@ pub fn decode(buf: []const u8) DecodeError!Message {
     }
 }
 
-/// Decoded message that may own heap memory (`diff.spans` and
-/// `session_list.entries`). Free with `deinit`. All other fields
-/// alias the input buffer.
+/// Decoded message that may own heap memory (`diff.spans`,
+/// `session_list.entries`, `harness_list.entries`). Free with
+/// `deinit`. All other fields alias the input buffer.
 pub const OwnedMessage = struct {
     msg: Message,
     spans: []DiffSpan = &.{},
     entries: []SessionListEntry = &.{},
+    hentries: []HarnessListEntry = &.{},
     alloc: Allocator = std.heap.page_allocator,
     owned: bool = false,
 
@@ -636,6 +690,7 @@ pub const OwnedMessage = struct {
         if (self.owned) switch (self.msg) {
             .diff => self.alloc.free(self.spans),
             .session_list => self.alloc.free(self.entries),
+            .harness_list => self.alloc.free(self.hentries),
             else => {},
         };
         self.* = undefined;
@@ -654,7 +709,7 @@ pub fn decodeAlloc(alloc: Allocator, buf: []const u8) DecodeError!OwnedMessage {
     if (buf[4] != protocol_version) return error.BadVersion;
     const tag = std.enums.fromInt(Type, buf[5]) orelse
         return error.UnknownMessage;
-    if (tag != .diff and tag != .session_list) {
+    if (tag != .diff and tag != .session_list and tag != .harness_list) {
         return .{ .msg = try decode(buf), .alloc = alloc };
     }
     if (tag == .session_list) {
@@ -675,6 +730,31 @@ pub fn decodeAlloc(alloc: Allocator, buf: []const u8) DecodeError!OwnedMessage {
         return .{
             .msg = .{ .session_list = .{ .entries = entries } },
             .entries = entries,
+            .alloc = alloc,
+            .owned = true,
+        };
+    }
+    if (tag == .harness_list) {
+        var r = Reader{ .buf = buf[6..] };
+        const count = try r.readU16();
+        const entries = alloc.alloc(HarnessListEntry, count) catch
+            return error.Malformed;
+        errdefer alloc.free(entries);
+        for (entries) |*e| {
+            const id = try r.bytes(4);
+            @memcpy(&e.id, id[0..4]);
+            e.tier1 = try r.readByte();
+            e.tier2 = try r.readByte();
+            e.tool_len = try r.readByte();
+            // The errdefer frees the table on any failure below.
+            if (e.tool_len > max_tool_len) return error.Malformed;
+            const tool = try r.bytes(max_tool_len);
+            @memcpy(&e.tool, tool[0..max_tool_len]);
+        }
+        if (r.rest() != 0) return error.Malformed;
+        return .{
+            .msg = .{ .harness_list = .{ .entries = entries } },
+            .hentries = entries,
             .alloc = alloc,
             .owned = true,
         };
@@ -993,4 +1073,36 @@ test "codec: session_list round trip via decodeAlloc" {
     @memcpy(short, frame[0..short.len]);
     std.mem.writeInt(u32, short[0..][0..4], @intCast(short.len - 4), .little);
     try testing.expectError(error.Malformed, decodeAlloc(alloc, short));
+}
+
+test "codec: harness_list round trip via decodeAlloc" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var e0 = HarnessListEntry{ .id = .{ 0xDE, 0xAD, 0xBE, 0xEF }, .tier1 = 2, .tier2 = 1, .tool_len = 4 };
+    @memcpy(e0.tool[0..4], "edit");
+    const rows = [_]HarnessListEntry{
+        e0,
+        .{ .id = .{ 0x01, 0x02, 0x03, 0x04 }, .tier1 = 5, .tier2 = 0, .tool_len = 0 },
+    };
+    const frame = try encode(alloc, .{ .harness_list = .{ .entries = &rows } });
+    defer alloc.free(frame);
+    const empty_frame = try encode(alloc, .{ .harness_list = .{ .entries = &.{} } });
+    defer alloc.free(empty_frame);
+    const empty = try decode(empty_frame);
+    try testing.expectEqual(@as(usize, 0), empty.harness_list.entries.len);
+    try testing.expectError(error.Malformed, decode(frame));
+    var back = try decodeAlloc(alloc, frame);
+    defer back.deinit();
+    try testing.expectEqual(@as(usize, 2), back.msg.harness_list.entries.len);
+    const b0 = back.msg.harness_list.entries[0];
+    try testing.expectEqual(rows[0].id, b0.id);
+    try testing.expectEqual(@as(u8, 2), b0.tier1);
+    try testing.expectEqual(@as(u8, 1), b0.tier2);
+    try testing.expectEqual(@as(u8, 4), b0.tool_len);
+    try testing.expectEqualStrings("edit", b0.tool[0..4]);
+    // Bad tool_len (> 32) is malformed.
+    var bad = try alloc.dupe(u8, frame);
+    defer alloc.free(bad);
+    bad[6 + 2 + 4 + 1 + 1] = 33;
+    try testing.expectError(error.Malformed, decodeAlloc(alloc, bad));
 }

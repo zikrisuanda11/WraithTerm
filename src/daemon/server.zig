@@ -19,6 +19,7 @@ const DaemonPty = @import("pty.zig").DaemonPty;
 const daemon_snapshot = @import("snapshot.zig");
 const sock = @import("socket.zig");
 const harness = @import("harness_sock.zig");
+const detect = @import("harness_detect.zig");
 const hevent = @import("harness_event.zig");
 
 /// A live session: metadata in `Manager`, owned PTY + optional
@@ -310,6 +311,9 @@ pub const Server = struct {
                     .list_sessions => {
                         try self.sendSessionList(fd);
                     },
+                    .query_harnesses => {
+                        try self.sendHarnessList(fd);
+                    },
                     .exit_when_empty => {
                         self.exit_when_empty = c.on != 0;
                         try writeMessage(fd, self.alloc, .{ .ack = .{ .state_id = 0, .seq_lo = 0, .flags = 0 } });
@@ -356,6 +360,50 @@ pub const Server = struct {
             };
         }
         try writeMessage(fd, self.alloc, .{ .session_list = .{ .entries = entries } });
+    }
+
+    /// Tier 1 comes from live bridge state; Tier 2 from one `/proc`
+    /// snapshot scored per session child pid (P2.2). A failed proc
+    /// scan degrades to tier2=false rather than failing the query.
+    fn sendHarnessList(self: *Server, fd: linux.socket_t) !void {
+        const n = self.manager.count();
+        const entries = try self.alloc.alloc(codec.HarnessListEntry, n);
+        defer self.alloc.free(entries);
+        var snapshot: []detect.Proc = &.{};
+        var proc_dir: ?std.Io.Dir = null;
+        if (std.Io.Dir.cwd().openDir(self.io, "/proc", .{ .iterate = true })) |d| {
+            proc_dir = d;
+        } else |_| {}
+        defer if (proc_dir) |*d| d.close(self.io);
+        if (proc_dir) |d| {
+            snapshot = detect.readSnapshot(self.alloc, self.io, d) catch &.{};
+        }
+        defer {
+            for (snapshot) |p| self.alloc.free(p.comm);
+            if (snapshot.len > 0) self.alloc.free(snapshot);
+        }
+        var it = self.manager.sessions.iterator();
+        var i: usize = 0;
+        while (it.next()) |kv| : (i += 1) {
+            var e = codec.HarnessListEntry{
+                .id = kv.key_ptr.*,
+                .tier1 = @intFromEnum(hevent.State.unknown),
+                .tier2 = 0,
+                .tool_len = 0,
+            };
+            if (self.live.getPtr(kv.key_ptr.*)) |ls| {
+                e.tier1 = @intFromEnum(ls.harness.state);
+                if (ls.harness.tool()) |t| {
+                    const m = @min(t.len, codec.max_tool_len);
+                    @memcpy(e.tool[0..m], t[0..m]);
+                    e.tool_len = @intCast(m);
+                }
+                const child: u32 = @intCast(ls.pty.pid);
+                if (detect.subtreeHasHarness(snapshot, child)) e.tier2 = 1;
+            }
+            entries[i] = e;
+        }
+        try writeMessage(fd, self.alloc, .{ .harness_list = .{ .entries = entries } });
     }
 };
 

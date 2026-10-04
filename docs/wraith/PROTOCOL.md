@@ -45,6 +45,7 @@ Setiap pesan pada Unix socket:
 | 0x09 | `ImageChunk` | C→S (remote) | Gambar chunked untuk paste remote |
 | 0x0A | `Ack` | dua arah | Konfirmasi state/seq |
 | 0x0B | `SessionList` | S→C | Jawaban `Control(ListSessions)`: daftar session (§4.11) |
+| 0x0C | `HarnessList` | S→C | Jawaban `Control(QueryHarnesses)`: Tier 1 + Tier 2 per session (§4.14) |
 | 0x7F | `Error` | dua arah | Kesalahan; lihat §4.13 |
 
 ## 4. Layout payload
@@ -186,6 +187,17 @@ u8   message[message_len] // UTF-8, untuk log/manusia; JANGAN memuat data layar/
 | 0x08 | Replay |
 | 0x09 | Timeout |
 
+### 4.14 `HarnessList` (0x0C)
+```
+u16  count
+u8   id[4]               // session ID mentah
+u8   tier1               // ordinal harness_event.State: 0=idle, 1=thinking, 2=executing_tool, 3=awaiting_approval, 4=error, 5=unknown
+u8   tier2               // 0/1: deteksi process-tree (P2.2)
+u8   tool_len            // ≤ 32
+u8   tool[32]            // nama tool Tier 1, `tool[0..tool_len]` valid, sisa nol
+...                      // `count` entri @ 39 byte
+```
+Jawaban atas `Control(QueryHarnesses)` (0x07). Daftar kosong = `count` 0.
 ## 5. Kapabilitas (bitmask `Hello.capabilities`)
 | Bit | Kapabilitas |
 |---|---|

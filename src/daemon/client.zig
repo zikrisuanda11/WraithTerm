@@ -124,6 +124,19 @@ pub const Client = struct {
         ) catch return error.OutOfMemory;
     }
 
+    /// Request the merged Tier 1 + Tier 2 harness view. Caller owns
+    /// the returned entries.
+    pub fn queryHarnesses(self: *Client) ![]codec.HarnessListEntry {
+        try self.send(.{ .control = .{ .command = .query_harnesses } });
+        var reply = try self.recv();
+        defer reply.deinit();
+        if (reply.owned.msg != .harness_list) return error.ExpectedList;
+        return self.alloc.dupe(
+            codec.HarnessListEntry,
+            reply.owned.msg.harness_list.entries,
+        ) catch return error.OutOfMemory;
+    }
+
     /// Kill the session selected by `helloCli`. The server replies
     /// `ack`, then closes the connection.
     pub fn killSession(self: *Client) !void {
@@ -530,6 +543,54 @@ test "daemon harness: fake bridge event changes session state" {
     }
 
     c1.deinit();
+    thread.join();
+}
+
+test "daemon harness: query merges tier1 and tier2" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const tmp = testing.environ.getPosix("TMPDIR") orelse "/tmp";
+    const path = try std.fmt.allocPrint(alloc, "{s}/wraith-p27q-{d}/ctl.sock", .{ tmp, linux.getpid() });
+    defer alloc.free(path);
+
+    var srv = try @import("server.zig").Server.init(alloc, testing.io, testing.environ, path);
+    defer srv.deinit();
+
+    // Two sequential control conns: create, then query.
+    const ServeTwo = struct {
+        fn run(s: *@import("server.zig").Server) void {
+            s.acceptOnce() catch {};
+            s.acceptOnce() catch {};
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, ServeTwo.run, .{&srv});
+
+    var c1 = try Client.connect(alloc, path);
+    const snap1 = try c1.hello("");
+    c1.freePayloads(snap1.payloads);
+    const sid = srv.last_id.?;
+    var id_buf: [SessionId.len]u8 = undefined;
+    const id_str = sid.toString(&id_buf);
+    c1.deinit();
+
+    // Tier 1 via direct ingest (the socket path is covered by the
+    // P2.4 test); the child runs `sleep`, so Tier 2 stays false.
+    srv.ingestHarnessEvent(.{ .state = .executing_tool, .tool = "edit", .session_id = id_str });
+
+    var cli = try Client.connect(alloc, path);
+    try cli.helloCli("");
+    const rows = try cli.queryHarnesses();
+    defer alloc.free(rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqual(sid.bytes, rows[0].id);
+    try testing.expectEqual(@intFromEnum(@import("harness_event.zig").State.executing_tool), rows[0].tier1);
+    try testing.expectEqual(@as(u8, 0), rows[0].tier2);
+    try testing.expectEqual(@as(u8, 4), rows[0].tool_len);
+    try testing.expectEqualStrings("edit", rows[0].tool[0..4]);
+    cli.deinit();
+
     thread.join();
 }
 
