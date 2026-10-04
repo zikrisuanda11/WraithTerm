@@ -54,4 +54,5 @@ test {
     _ = @import("daemon/harness_tier3.zig");
     _ = @import("daemon/image_store.zig");
     _ = @import("daemon/image_paste.zig");
+    _ = @import("daemon/ssp_crypto.zig");
 }

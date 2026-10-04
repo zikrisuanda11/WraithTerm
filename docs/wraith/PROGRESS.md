@@ -56,7 +56,7 @@ Aturan iterasi: kerjakan SATU task `[ ]` pertama (dari atas) yang seluruh depend
 - **Phase gate P3:** build + test hijau. Merge ke `wraith/dev`.
 
 ## Phase 4 — Remote SSP (Pilar 2)
-- [ ] **P4.1** ← P0.4 Modul kripto (D3): AEAD, nonce, jendela replay. *Selesai bila:* test: round-trip, tamper ditolak, replay ditolak, nonce tidak berulang, arah berbeda tak saling dekripsi.
+- [x] **P4.1** ← P0.4 Modul kripto (D3): AEAD, nonce, jendela replay. *Selesai bila:* test: round-trip, tamper ditolak, replay ditolak, nonce tidak berulang, arah berbeda tak saling dekripsi. *(selesai 2026-10-05: `ssp_crypto.zig` (`Sealer` nonce `[u32 dir][u64 seq]`, header=AAD, `Opener` jendela-1024-bit) + 4 test OK (round-trip 2 arah, tamper/AAD/direksi/pendek ditolak, replay+TooOld pasca-lompat, 16 nonce unik + dir-word beda); filter `crypto` hijau 2x, `zig build` EXIT=0; pelajaran: bitmap aging geser KIRI (indeks naik saat top maju), `std.crypto.random` tak ada di 0.16 → kunci-t tetap, `arr[0..]` stack tak cocok arm generik)*
 - [ ] **P4.2** ← P0.6, P4.1 Transport datagram (fragmentasi/reassembly, timeout) di balik antarmuka + `LossyLink` (loss/delay/dup/reorder, seed tetap). *Selesai bila:* test fragmentasi di bawah loss/reorder lulus deterministik.
 - [ ] **P4.3** ← P4.1, P1.8 Bootstrap SSH + handshake (D2), mode `--remote-server`, timeout 60 dtk. *Selesai bila:* test bootstrap dengan "SSH palsu" (skrip lokal) + test timeout.
 - [ ] **P4.4** ← P4.2, P4.3 Sinkronisasi snapshot penuh (tanpa diff) end-to-end. *Selesai bila:* e2e loopback: layar klien == layar server.
