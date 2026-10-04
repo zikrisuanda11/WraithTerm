@@ -184,7 +184,8 @@ test "daemon socket: dir 0700, socket 0600, accept works" {
     try testing.expectEqual(@as(u8, 'Q'), b[0]);
 }
 
-fn modeOf(alloc: Allocator, path: []const u8) !u16 {
+/// Socket/dir mode via statx (test helper; no std.fs in the daemon).
+pub fn modeOf(alloc: Allocator, path: []const u8) !u16 {
     const z = try alloc.dupeZ(u8, path);
     defer alloc.free(z);
     var stx: linux.Statx = undefined;

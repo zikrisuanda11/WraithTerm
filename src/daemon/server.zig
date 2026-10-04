@@ -18,20 +18,27 @@ const SessionId = @import("id.zig").SessionId;
 const DaemonPty = @import("pty.zig").DaemonPty;
 const daemon_snapshot = @import("snapshot.zig");
 const sock = @import("socket.zig");
+const harness = @import("harness_sock.zig");
+const hevent = @import("harness_event.zig");
 
 /// A live session: metadata in `Manager`, owned PTY + optional
 /// active client connection here.
 const LiveSession = struct {
     pty: *DaemonPty,
     conn: ?linux.socket_t = null,
+    harness: harness.HarnessState = .{},
 };
 
 pub const Server = struct {
     alloc: Allocator,
     io: std.Io,
+    environ: std.process.Environ,
     manager: session.Manager,
     live: std.AutoHashMap([4]u8, LiveSession),
     listener: sock.Server,
+    /// Harness event listener (D6): bridges write JSON-lines here.
+    harness_listener: sock.Server,
+    harness_path: []u8,
     /// The session id created or attached by the last served
     /// connection (test hook; set on `hello`).
     last_id: ?SessionId = null,
@@ -42,14 +49,26 @@ pub const Server = struct {
     pub fn init(
         alloc: Allocator,
         io: std.Io,
+        environ: std.process.Environ,
         socket_path: []const u8,
     ) sock.ListenError!Server {
+        const daemon_id = SessionId.generate(io);
+        var id_buf: [SessionId.len]u8 = undefined;
+        const hpath = try harness.listenerPath(
+            alloc,
+            socket_path,
+            daemon_id.toString(&id_buf),
+        );
+        errdefer alloc.free(hpath);
         return .{
             .alloc = alloc,
             .io = io,
+            .environ = environ,
             .manager = .init(alloc, 64, 4 * 1024 * 1024),
             .live = .init(alloc),
             .listener = try sock.Server.listen(alloc, socket_path),
+            .harness_listener = try sock.Server.listen(alloc, hpath),
+            .harness_path = hpath,
         };
     }
 
@@ -64,6 +83,8 @@ pub const Server = struct {
         self.live.deinit();
         self.manager.deinit();
         self.listener.deinit();
+        self.harness_listener.deinit();
+        self.alloc.free(self.harness_path);
     }
 
     /// Accept one connection and serve it until EOF/detach.
@@ -122,6 +143,39 @@ pub const Server = struct {
         return self.exit_when_empty and self.manager.count() == 0;
     }
 
+    /// Accept one bridge connection on the harness socket and ingest
+    /// its event lines until EOF. Unknown/absent session ids are
+    /// skipped; malformed lines never fail the connection.
+    pub fn acceptHarnessOnce(self: *Server) !void {
+        const fd: linux.socket_t = try syscall(linux.accept(
+            self.harness_listener.fd,
+            null,
+            null,
+        ));
+        defer _ = linux.close(fd);
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        var buf: [hevent.max_line_bytes + 1]u8 = undefined;
+        while (true) {
+            const n = harness.readLine(fd, &buf) catch continue;
+            const line = n orelse return;
+            switch (hevent.parseLine(arena.allocator(), buf[0..line])) {
+                .ok => |ev| self.ingestHarnessEvent(ev),
+                .skip => {},
+            }
+        }
+    }
+
+    /// Apply one bridge event to its session. Events without a
+    /// parseable `session_id`, or for unknown sessions, are dropped.
+    pub fn ingestHarnessEvent(self: *Server, ev: hevent.Event) void {
+        if (ev.session_id.len == 0) return;
+        const id = SessionId.parse(ev.session_id) catch return;
+        if (self.live.getPtr(id.bytes)) |ls| {
+            ls.harness.apply(ev);
+        }
+    }
+
     fn serveConn(self: *Server, fd: linux.socket_t) !void {
         var sid: ?SessionId = null;
         defer {
@@ -160,8 +214,17 @@ pub const Server = struct {
                     if (h.id.len == 0) {
                         const id = try self.manager.create(self.io, nowMs(self.io));
                         errdefer self.manager.kill(id) catch {};
+                        // Every child sees the harness socket + its own
+                        // session id (D6); the bridge uses them to report
+                        // state without knowing daemon internals.
+                        var id_buf: [SessionId.len]u8 = undefined;
+                        const id_str = id.toString(&id_buf);
+                        var child_env = try self.environ.createMap(self.alloc);
+                        defer child_env.deinit();
+                        try child_env.put(harness.sock_env, self.harness_path);
+                        try child_env.put(harness.session_env, id_str);
                         const argv = [_][:0]const u8{ "/bin/sh", "-c", "sleep 60" };
-                        const pty = try DaemonPty.spawn(self.alloc, &argv, null, 80, 24);
+                        const pty = try DaemonPty.spawn(self.alloc, &argv, &child_env, 80, 24);
                         errdefer {
                             pty.kill();
                             pty.deinit();

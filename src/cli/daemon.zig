@@ -46,7 +46,7 @@ pub fn run(gpa: Allocator) !u8 {
     const path = try controlSocketPath(gpa);
     defer gpa.free(path);
 
-    var srv = Server.init(gpa, global.io(), path) catch |err| {
+    var srv = Server.init(gpa, global.io(), global.environ(), path) catch |err| {
         var buffer: [256]u8 = undefined;
         var stderr_writer = std.Io.File.stderr().writer(global.io(), &buffer);
         stderr_writer.interface.print("daemon: cannot listen: {t}\n", .{err}) catch {};

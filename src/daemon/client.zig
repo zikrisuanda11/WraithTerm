@@ -10,6 +10,8 @@ const codec = @import("codec.zig");
 const server = @import("server.zig");
 const daemon_snapshot = @import("snapshot.zig");
 const Terminal = @import("../terminal/Terminal.zig");
+const SessionId = @import("id.zig").SessionId;
+const session = @import("session.zig");
 
 pub const Client = struct {
     alloc: Allocator,
@@ -177,7 +179,7 @@ test "daemon attach: spawn, detach, reattach keeps child and screen" {
     const path = try std.fmt.allocPrint(alloc, "{s}/wraith-p17-{d}/ctl.sock", .{ tmp, linux.getpid() });
     defer alloc.free(path);
 
-    var srv = try @import("server.zig").Server.init(alloc, testing.io, path);
+    var srv = try @import("server.zig").Server.init(alloc, testing.io, testing.environ, path);
     defer srv.deinit();
 
     // Server thread serves two connections: create + reattach.
@@ -274,7 +276,7 @@ test "daemon attach: second attach takes over, old client detached" {
     const path = try std.fmt.allocPrint(alloc, "{s}/wraith-p17take-{d}/ctl.sock", .{ tmp, linux.getpid() });
     defer alloc.free(path);
 
-    var srv = try @import("server.zig").Server.init(alloc, testing.io, path);
+    var srv = try @import("server.zig").Server.init(alloc, testing.io, testing.environ, path);
     defer srv.deinit();
 
     const Server = @import("server.zig").Server;
@@ -327,7 +329,7 @@ test "daemon control: list, kill, exit-when-empty" {
     const path = try std.fmt.allocPrint(alloc, "{s}/wraith-p18ctl-{d}/ctl.sock", .{ tmp, linux.getpid() });
     defer alloc.free(path);
 
-    var srv = try @import("server.zig").Server.init(alloc, testing.io, path);
+    var srv = try @import("server.zig").Server.init(alloc, testing.io, testing.environ, path);
     defer srv.deinit();
 
     // c1 stays connected while the CLI-style conns come and go, so
@@ -409,8 +411,127 @@ test "daemon control: list, kill, exit-when-empty" {
     thread.join();
 }
 
-const SessionId = @import("id.zig").SessionId;
-const session = @import("session.zig");
+test "daemon harness: fake bridge event changes session state" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const tmp = testing.environ.getPosix("TMPDIR") orelse "/tmp";
+    const path = try std.fmt.allocPrint(alloc, "{s}/wraith-p24hs-{d}/ctl.sock", .{ tmp, linux.getpid() });
+    defer alloc.free(path);
+
+    var srv = try @import("server.zig").Server.init(alloc, testing.io, testing.environ, path);
+    defer srv.deinit();
+
+    // Harness socket is 0600 like the control socket.
+    try testing.expectEqual(@as(u16, 0o600), (try @import("socket.zig").modeOf(alloc, srv.harness_path)) & 0o777);
+
+    const Server = @import("server.zig").Server;
+    const Pump = struct {
+        fn run(s: *Server) void {
+            // One control conn (create) + one harness conn (events).
+            const fd = s.acceptFd() catch return;
+            const t = std.Thread.spawn(.{}, Server.serveFd, .{ s, fd }) catch {
+                _ = linux.close(fd);
+                return;
+            };
+            s.acceptHarnessOnce() catch {};
+            t.join();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Pump.run, .{&srv});
+
+    // Create a session; the child must see the harness env.
+    var c1 = try Client.connect(alloc, path);
+    const snap1 = try c1.hello("");
+    c1.freePayloads(snap1.payloads);
+    const sid = srv.last_id.?;
+    var id_buf: [SessionId.len]u8 = undefined;
+    const id_str = sid.toString(&id_buf);
+
+    // Env injection proof: the child's /proc environ carries both vars.
+    {
+        const child_pid = srv.live.getPtr(sid.bytes).?.pty.pid;
+        var env_buf: [8192]u8 = undefined;
+        var proc_path: [64]u8 = undefined;
+        const env_path = try std.fmt.bufPrint(&proc_path, "/proc/{d}/environ", .{child_pid});
+        var f = try std.Io.Dir.cwd().openFile(testing.io, env_path, .{});
+        defer f.close(testing.io);
+        // /proc environ has unknown length: accumulate short reads.
+        var env_data: std.ArrayList(u8) = .empty;
+        defer env_data.deinit(alloc);
+        var r = f.reader(testing.io, &env_buf);
+        var chunk: [4096]u8 = undefined;
+        while (true) {
+            const n = r.interface.readSliceShort(&chunk) catch break;
+            if (n == 0) break;
+            try env_data.appendSlice(alloc, chunk[0..n]);
+        }
+        try testing.expect(std.mem.indexOf(u8, env_data.items, "WRAITH_HARNESS_SOCK=") != null);
+        var sock_var: [256]u8 = undefined;
+        const want_sock = try std.fmt.bufPrint(
+            &sock_var,
+            "WRAITH_HARNESS_SOCK={s}",
+            .{srv.harness_path},
+        );
+        try testing.expect(std.mem.indexOf(u8, env_data.items, want_sock) != null);
+        var sess_var: [64]u8 = undefined;
+        const want_sess = try std.fmt.bufPrint(&sess_var, "WRAITH_SESSION_ID={s}", .{id_str});
+        try testing.expect(std.mem.indexOf(u8, env_data.items, want_sess) != null);
+    }
+
+    // Fake bridge: connect to the harness socket and write events.
+    {
+        const fd: linux.socket_t = syscall(linux.socket(
+            linux.AF.UNIX,
+            linux.SOCK.STREAM | linux.SOCK.CLOEXEC,
+            0,
+        )) catch return error.SocketFailed;
+        defer _ = linux.close(fd);
+        var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = undefined };
+        if (srv.harness_path.len >= addr.path.len) return error.PathTooLong;
+        @memcpy(addr.path[0..srv.harness_path.len], srv.harness_path);
+        addr.path[srv.harness_path.len] = 0;
+        _ = syscall(linux.connect(
+            fd,
+            @ptrCast(&addr),
+            @intCast(@offsetOf(linux.sockaddr.un, "path") + srv.harness_path.len + 1),
+        )) catch return error.ConnectFailed;
+        var ev_buf: [256]u8 = undefined;
+        const ev1 = try std.fmt.bufPrint(
+            &ev_buf,
+            "{{\"v\":1,\"type\":\"state\",\"state\":\"executing_tool\",\"tool\":\"edit\",\"session_id\":\"{s}\"}}\n",
+            .{id_str},
+        );
+        _ = linux.write(fd, ev1.ptr, ev1.len);
+        // Garbage + unknown-session lines must not disturb the session.
+        _ = linux.write(fd, "not json\n", "not json\n".len);
+        const unknown_sess = "{\"v\":1,\"type\":\"state\",\"state\":\"idle\",\"session_id\":\"00000000\"}\n";
+        _ = linux.write(fd, unknown_sess.ptr, unknown_sess.len);
+        const ev2 = try std.fmt.bufPrint(
+            &ev_buf,
+            "{{\"v\":1,\"type\":\"state\",\"state\":\"awaiting_approval\",\"session_id\":\"{s}\"}}\n",
+            .{id_str},
+        );
+        _ = linux.write(fd, ev2.ptr, ev2.len);
+    }
+
+    // The pump thread ingests until the bridge closes; poll for it.
+    var tries: usize = 0;
+    while (tries < 100) : (tries += 1) {
+        const hs = srv.live.getPtr(sid.bytes).?.harness;
+        if (hs.state == .awaiting_approval and hs.tool() == null) break;
+        std.Io.sleep(testing.io, .fromMilliseconds(20), .awake) catch {};
+    }
+    {
+        const hs = srv.live.getPtr(sid.bytes).?.harness;
+        try testing.expectEqual(@import("harness_event.zig").State.awaiting_approval, hs.state);
+        try testing.expect(hs.tool() == null);
+    }
+
+    c1.deinit();
+    thread.join();
+}
 
 fn gridContains(term: *Terminal, needle: []const u8) bool {
     var y: u16 = 0;
