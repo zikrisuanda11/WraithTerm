@@ -94,6 +94,54 @@ pub const Client = struct {
         self.alloc.free(payloads);
     }
 
+    /// Control-plane hello (`role=cli`): no session is created;
+    /// the server replies `ack`. `id` selects a kill target or is
+    /// empty for `list_sessions` / `exit_when_empty`.
+    pub fn helloCli(self: *Client, id: []const u8) !void {
+        try self.send(.{ .hello = .{
+            .version_min = 1,
+            .version_max = codec.protocol_version,
+            .capabilities = 0,
+            .role = .cli,
+            .id = id,
+        } });
+        var ack = try self.recv();
+        defer ack.deinit();
+        if (ack.owned.msg != .ack) return error.ExpectedAck;
+    }
+
+    /// Request the session list. Caller owns the returned entries.
+    pub fn listSessions(self: *Client) ![]codec.SessionListEntry {
+        try self.send(.{ .control = .{ .command = .list_sessions } });
+        var reply = try self.recv();
+        defer reply.deinit();
+        if (reply.owned.msg != .session_list) return error.ExpectedList;
+        return self.alloc.dupe(
+            codec.SessionListEntry,
+            reply.owned.msg.session_list.entries,
+        ) catch return error.OutOfMemory;
+    }
+
+    /// Kill the session selected by `helloCli`. The server replies
+    /// `ack`, then closes the connection.
+    pub fn killSession(self: *Client) !void {
+        try self.send(.{ .control = .{ .command = .kill_session } });
+        var ack = try self.recv();
+        defer ack.deinit();
+        if (ack.owned.msg != .ack) return error.ExpectedAck;
+    }
+
+    /// Set the daemon's `--exit-when-empty` latch (D8).
+    pub fn setExitWhenEmpty(self: *Client, on: bool) !void {
+        try self.send(.{ .control = .{
+            .command = .exit_when_empty,
+            .on = if (on) 1 else 0,
+            .has_on = true,
+        } });
+        var ack = try self.recv();
+        defer ack.deinit();
+        if (ack.owned.msg != .ack) return error.ExpectedAck;
+    }
     /// Restore a terminal from joined snapshot payloads.
     pub fn restore(
         self: *Client,
@@ -267,6 +315,97 @@ test "daemon attach: second attach takes over, old client detached" {
 
     c1.deinit();
     c2.deinit();
+    thread.join();
+}
+
+test "daemon control: list, kill, exit-when-empty" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const tmp = testing.environ.getPosix("TMPDIR") orelse "/tmp";
+    const path = try std.fmt.allocPrint(alloc, "{s}/wraith-p18ctl-{d}/ctl.sock", .{ tmp, linux.getpid() });
+    defer alloc.free(path);
+
+    var srv = try @import("server.zig").Server.init(alloc, testing.io, path);
+    defer srv.deinit();
+
+    // c1 stays connected while the CLI-style conns come and go, so
+    // each accepted fd gets its own serving thread (P1.7 lesson:
+    // sequential acceptOnce deadlocks here).
+    const Server = @import("server.zig").Server;
+    const ServeN = struct {
+        fn run(s: *Server) void {
+            var threads: [5]std.Thread = undefined;
+            var n: usize = 0;
+            while (n < 5) : (n += 1) {
+                const fd = s.acceptFd() catch break;
+                threads[n] = std.Thread.spawn(.{}, Server.serveFd, .{ s, fd }) catch {
+                    _ = linux.close(fd);
+                    break;
+                };
+            }
+            for (threads[0..n]) |t| t.join();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, ServeN.run, .{&srv});
+
+    // Empty daemon lists zero sessions.
+    {
+        var cli = try Client.connect(alloc, path);
+        defer cli.deinit();
+        try cli.helloCli("");
+        const rows = try cli.listSessions();
+        defer alloc.free(rows);
+        try testing.expectEqual(@as(usize, 0), rows.len);
+    }
+
+    // Create one session via the attach path, keep it connected.
+    var c1 = try Client.connect(alloc, path);
+    const snap1 = try c1.hello("");
+    c1.freePayloads(snap1.payloads);
+    const sid = srv.last_id.?;
+    var id_buf: [SessionId.len]u8 = undefined;
+    const id_str = sid.toString(&id_buf);
+
+    // List now shows one attached session with the right id.
+    {
+        var cli = try Client.connect(alloc, path);
+        defer cli.deinit();
+        try cli.helloCli("");
+        const rows = try cli.listSessions();
+        defer alloc.free(rows);
+        try testing.expectEqual(@as(usize, 1), rows.len);
+        var hex: [SessionId.len]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
+            rows[0].id[0],
+            rows[0].id[1],
+            rows[0].id[2],
+            rows[0].id[3],
+        }) catch unreachable;
+        try testing.expectEqualStrings(id_str, &hex);
+        try testing.expectEqual(@intFromEnum(session.State.attached), rows[0].state);
+    }
+
+    // Kill it by id; the child dies and the list empties.
+    {
+        var cli = try Client.connect(alloc, path);
+        defer cli.deinit();
+        try cli.helloCli(id_str);
+        try cli.killSession();
+    }
+    try testing.expect(srv.manager.get(sid) == null);
+    c1.deinit();
+
+    // Latch exit-when-empty: with zero sessions the loop stops.
+    {
+        var cli = try Client.connect(alloc, path);
+        defer cli.deinit();
+        try cli.helloCli("");
+        try cli.setExitWhenEmpty(true);
+    }
+    try testing.expect(srv.stopRequested());
+
     thread.join();
 }
 

@@ -3955,6 +3955,14 @@ term: []const u8 = "xterm-ghostty",
 /// This only works on macOS since only macOS has an auto-update feature.
 @"auto-update-channel": ?build_config.ReleaseChannel = null,
 
+/// Whether the WraithTerm daemon starts automatically (D8).
+///
+/// `off` keeps stock Ghostty behavior: every window owns its PTY
+/// directly. `auto` makes the CLI actions (`+attach`,
+/// `+list-sessions`, `+kill`) start the daemon on demand when the
+/// control socket is missing, so the first command just works.
+@"wraith-daemon": WraithDaemon = .off,
+
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,
 
@@ -5497,6 +5505,12 @@ pub const LinkPreviews = enum {
     false,
     true,
     osc8,
+};
+
+/// See `wraith-daemon`
+pub const WraithDaemon = enum {
+    off,
+    auto,
 };
 
 /// See working-directory

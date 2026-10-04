@@ -11,6 +11,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
+const posix = std.posix;
 const codec = @import("codec.zig");
 const session = @import("session.zig");
 const SessionId = @import("id.zig").SessionId;
@@ -34,6 +35,9 @@ pub const Server = struct {
     /// The session id created or attached by the last served
     /// connection (test hook; set on `hello`).
     last_id: ?SessionId = null,
+    /// Set by `Control{exit_when_empty, on=1}`: `run` returns once
+    /// no sessions remain (D8: `--exit-when-empty`).
+    exit_when_empty: bool = false,
 
     pub fn init(
         alloc: Allocator,
@@ -81,6 +85,43 @@ pub const Server = struct {
         _ = linux.close(fd);
     }
 
+    /// How long `run` idles with zero sessions before exiting when
+    /// `exit_when_empty` is set (D8: 10 seconds).
+    pub const empty_idle_ns: u64 = 10 * std.time.ns_per_s;
+
+    /// Serve connections one at a time until the exit latch fires.
+    /// With `exit_when_empty`, the latch fires only after 10 idle
+    /// seconds with zero sessions (D8) — a freshly started daemon
+    /// with no sessions yet still serves. The `+daemon` CLI action
+    /// runs this; tests drive `acceptFd` + `serveFd` directly for
+    /// concurrency.
+    pub fn run(self: *Server) void {
+        var empty_since: ?std.Io.Timestamp = null;
+        while (true) {
+            if (self.exit_when_empty and self.manager.count() == 0) {
+                const now = std.Io.Timestamp.now(self.io, .awake);
+                if (empty_since == null) empty_since = now;
+                if (empty_since.?.durationTo(now).toNanoseconds() >= empty_idle_ns) return;
+            } else {
+                empty_since = null;
+            }
+            // Poll the listener so the idle deadline fires even with
+            // no incoming connections.
+            var fds = [_]posix.pollfd{.{
+                .fd = self.listener.fd,
+                .events = posix.POLL.IN,
+                .revents = 0,
+            }};
+            const n = posix.poll(&fds, 1000) catch continue;
+            if (n == 0) continue;
+            self.acceptOnce() catch {};
+        }
+    }
+
+    pub fn stopRequested(self: *const Server) bool {
+        return self.exit_when_empty and self.manager.count() == 0;
+    }
+
     fn serveConn(self: *Server, fd: linux.socket_t) !void {
         var sid: ?SessionId = null;
         defer {
@@ -98,6 +139,24 @@ pub const Server = struct {
             defer msg.deinit();
             switch (msg.owned.msg) {
                 .hello => |h| {
+                    if (h.role == .cli) {
+                        // Control-only CLI: no session is created or
+                        // attached. A set id selects the target for a
+                        // later `kill_session`; empty id scopes the
+                        // connection to `list_sessions` /
+                        // `exit_when_empty`.
+                        if (h.id.len != 0) {
+                            sid = SessionId.parse(h.id) catch {
+                                try writeMessage(fd, self.alloc, .{ .@"error" = .{
+                                    .code = .no_such_session,
+                                    .message = "bad session id",
+                                } });
+                                continue;
+                            };
+                        }
+                        try writeMessage(fd, self.alloc, .{ .ack = .{ .state_id = 0, .seq_lo = 0, .flags = 0 } });
+                        continue;
+                    }
                     if (h.id.len == 0) {
                         const id = try self.manager.create(self.io, nowMs(self.io));
                         errdefer self.manager.kill(id) catch {};
@@ -181,10 +240,20 @@ pub const Server = struct {
                             ls.pty.deinit();
                         }
                         self.manager.kill(id) catch {};
+                        try writeMessage(fd, self.alloc, .{ .ack = .{ .state_id = 0, .seq_lo = 0, .flags = 0 } });
                         sid = null;
                         return;
                     },
-                    else => {},
+                    .list_sessions => {
+                        try self.sendSessionList(fd);
+                    },
+                    .exit_when_empty => {
+                        self.exit_when_empty = c.on != 0;
+                        try writeMessage(fd, self.alloc, .{ .ack = .{ .state_id = 0, .seq_lo = 0, .flags = 0 } });
+                    },
+                    // Takeover is implicit on attach (D8); an explicit
+                    // `take_over` control is accepted and ignored.
+                    .take_over => {},
                 },
                 else => {},
             }
@@ -209,6 +278,21 @@ pub const Server = struct {
         for (taken.messages) |m| {
             try writeMessage(fd, self.alloc, m);
         }
+    }
+
+    fn sendSessionList(self: *Server, fd: linux.socket_t) !void {
+        const n = self.manager.count();
+        const entries = try self.alloc.alloc(codec.SessionListEntry, n);
+        defer self.alloc.free(entries);
+        var it = self.manager.sessions.iterator();
+        var i: usize = 0;
+        while (it.next()) |kv| : (i += 1) {
+            entries[i] = .{
+                .id = kv.key_ptr.*,
+                .state = @intFromEnum(kv.value_ptr.state),
+            };
+        }
+        try writeMessage(fd, self.alloc, .{ .session_list = .{ .entries = entries } });
     }
 };
 

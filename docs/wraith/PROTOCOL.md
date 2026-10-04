@@ -44,7 +44,8 @@ Setiap pesan pada Unix socket:
 | 0x08 | `Telemetry` | S→C (remote) | Event harness omp |
 | 0x09 | `ImageChunk` | C→S (remote) | Gambar chunked untuk paste remote |
 | 0x0A | `Ack` | dua arah | Konfirmasi state/seq |
-| 0x7F | `Error` | dua arah | Kesalahan; lihat §4.12 |
+| 0x0B | `SessionList` | S→C | Jawaban `Control(ListSessions)`: daftar session (§4.11) |
+| 0x7F | `Error` | dua arah | Kesalahan; lihat §4.13 |
 
 ## 4. Layout payload
 
@@ -154,14 +155,25 @@ u16  seq_lo              // opsional: ack paket SSP
 u16  flags
 ```
 
-### 4.11 `Error` (0x7F)
+### 4.11 `SessionList` (0x0B)
 ```
-u8   code                // §4.12
+u16  count
+u8   id[4]               // session ID mentah per entri (CLI format 8 hex)
+u8   state               // ordinal session.State: 0=detached, 1=attached, 2=closing
+...                      // `count` entri @ 5 byte
+```
+Jawaban atas `Control(ListSessions)`. Daftar kosong = `count` 0.
+`role=2` (`cli`) pada `Hello` menandai koneksi kontrol saja: tanpa
+create/attach/snapshot, hanya `Control` + balasan.
+
+### 4.12 `Error` (0x7F)
+```
+u8   code                // §4.13
 u16  message_len
 u8   message[message_len] // UTF-8, untuk log/manusia; JANGAN memuat data layar/input/kunci
 ```
 
-### 4.12 Kode error
+### 4.13 Kode error
 | Kode | Nama |
 |---|---|
 | 0x01 | BadVersion |

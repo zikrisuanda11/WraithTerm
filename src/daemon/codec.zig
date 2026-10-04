@@ -31,6 +31,7 @@ pub const Type = enum(u8) {
     telemetry = 0x08,
     image_chunk = 0x09,
     ack = 0x0A,
+    session_list = 0x0B,
     @"error" = 0x7F,
 };
 
@@ -64,10 +65,12 @@ pub const DecodeError = error{
     /// (role, kind, command, reason, mime tag) holds an unknown value.
     Malformed,
 };
-
 pub const Role = enum(u8) {
     client = 0,
     daemon = 1,
+    /// Control-only CLI (`+list-sessions`, `+kill`): no session is
+    /// created or attached; the connection only issues `Control`.
+    cli = 2,
 };
 
 pub const Hello = struct {
@@ -180,6 +183,22 @@ pub const Ack = struct {
     flags: u16,
 };
 
+/// One row of a `SessionList` reply. `id` is the raw 4 session bytes
+/// (the CLI formats them as 8 hex chars); `state` is the
+/// `session.State` ordinal (`@intFromEnum`), documented here so the
+/// CLI does not import daemon internals: 0=detached, 1=attached,
+/// 2=closing.
+pub const SessionListEntry = struct {
+    id: [4]u8,
+    state: u8,
+};
+
+/// Reply to `Control{list_sessions}`: `u16 count` followed by
+/// `count` entries of `[4]id + [1]state`.
+pub const SessionList = struct {
+    entries: []const SessionListEntry,
+};
+
 pub const ErrorMsg = struct {
     code: ErrorCode,
     /// Human-readable UTF-8. MUST NOT carry screen/input/key material.
@@ -197,6 +216,7 @@ pub const Message = union(Type) {
     telemetry: Telemetry,
     image_chunk: ImageChunk,
     ack: Ack,
+    session_list: SessionList,
     @"error": ErrorMsg,
 };
 
@@ -220,6 +240,7 @@ fn payloadLen(msg: Message) usize {
         .telemetry => |m| 2 + m.event.len + 4,
         .image_chunk => |m| 2 + 2 + 2 + 1 + 4 + m.data.len,
         .ack => 4 + 2 + 2,
+        .session_list => |m| 2 + 5 * m.entries.len,
         .@"error" => |m| 1 + 2 + m.message.len,
     };
 }
@@ -373,6 +394,16 @@ pub fn encode(alloc: Allocator, msg: Message) Allocator.Error![]u8 {
             off += 2;
             writeU16(out, off, m.flags);
             off += 2;
+        },
+        .session_list => |m| {
+            writeU16(out, off, @intCast(m.entries.len));
+            off += 2;
+            for (m.entries) |e| {
+                @memcpy(out[off..][0..4], &e.id);
+                off += 4;
+                out[off] = e.state;
+                off += 1;
+            }
         },
         .@"error" => |m| {
             out[off] = @intFromEnum(m.code);
@@ -571,6 +602,15 @@ pub fn decode(buf: []const u8) DecodeError!Message {
                 .flags = flags,
             } };
         },
+        .session_list => {
+            // Like `diff` with spans (P1.2): the entry table needs a
+            // struct slice, so allocation-free `decode` only accepts
+            // the empty list; use `decodeAlloc` otherwise.
+            const count = try r.readU16();
+            if (count != 0) return error.Malformed;
+            if (r.rest() != 0) return error.Malformed;
+            return .{ .session_list = .{ .entries = &.{} } };
+        },
         .@"error" => {
             const code = std.enums.fromInt(ErrorCode, try r.readByte()) orelse
                 return error.Malformed;
@@ -582,16 +622,22 @@ pub fn decode(buf: []const u8) DecodeError!Message {
     }
 }
 
-/// Decoded message that may own heap memory (only `diff.spans` needs
-/// it). Free with `deinit`. All other fields alias the input buffer.
+/// Decoded message that may own heap memory (`diff.spans` and
+/// `session_list.entries`). Free with `deinit`. All other fields
+/// alias the input buffer.
 pub const OwnedMessage = struct {
     msg: Message,
     spans: []DiffSpan = &.{},
+    entries: []SessionListEntry = &.{},
     alloc: Allocator = std.heap.page_allocator,
     owned: bool = false,
 
     pub fn deinit(self: *OwnedMessage) void {
-        if (self.owned) self.alloc.free(self.spans);
+        if (self.owned) switch (self.msg) {
+            .diff => self.alloc.free(self.spans),
+            .session_list => self.alloc.free(self.entries),
+            else => {},
+        };
         self.* = undefined;
     }
 };
@@ -608,8 +654,30 @@ pub fn decodeAlloc(alloc: Allocator, buf: []const u8) DecodeError!OwnedMessage {
     if (buf[4] != protocol_version) return error.BadVersion;
     const tag = std.enums.fromInt(Type, buf[5]) orelse
         return error.UnknownMessage;
-    if (tag != .diff) {
+    if (tag != .diff and tag != .session_list) {
         return .{ .msg = try decode(buf), .alloc = alloc };
+    }
+    if (tag == .session_list) {
+        var r = Reader{ .buf = buf[6..] };
+        const count = try r.readU16();
+        const entries = alloc.alloc(SessionListEntry, count) catch
+            return error.Malformed;
+        errdefer alloc.free(entries);
+        for (entries) |*e| {
+            const id = try r.bytes(4);
+            @memcpy(&e.id, id[0..4]);
+            e.state = try r.readByte();
+        }
+        if (r.rest() != 0) {
+            alloc.free(entries);
+            return error.Malformed;
+        }
+        return .{
+            .msg = .{ .session_list = .{ .entries = entries } },
+            .entries = entries,
+            .alloc = alloc,
+            .owned = true,
+        };
     }
     var r = Reader{ .buf = buf[6..] };
     const base_state_id = try r.readU32();
@@ -896,4 +964,33 @@ test "codec: rejects bad enum values and short payloads" {
 
     // Empty buffer.
     try testing.expectError(error.Truncated, decode(&[_]u8{}));
+}
+
+test "codec: session_list round trip via decodeAlloc" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const rows = [_]SessionListEntry{
+        .{ .id = .{ 0xDE, 0xAD, 0xBE, 0xEF }, .state = 1 },
+        .{ .id = .{ 0x01, 0x02, 0x03, 0x04 }, .state = 0 },
+    };
+    const frame = try encode(alloc, .{ .session_list = .{ .entries = &rows } });
+    defer alloc.free(frame);
+    // Empty list decodes without allocation.
+    const empty_frame = try encode(alloc, .{ .session_list = .{ .entries = &.{} } });
+    defer alloc.free(empty_frame);
+    const empty = try decode(empty_frame);
+    try testing.expectEqual(@as(usize, 0), empty.session_list.entries.len);
+    // Non-empty needs decodeAlloc.
+    try testing.expectError(error.Malformed, decode(frame));
+    var back = try decodeAlloc(alloc, frame);
+    defer back.deinit();
+    try testing.expectEqual(@as(usize, 2), back.msg.session_list.entries.len);
+    try testing.expectEqual(rows[0], back.msg.session_list.entries[0]);
+    try testing.expectEqual(rows[1], back.msg.session_list.entries[1]);
+    // Truncated entry table.
+    const short = try alloc.alloc(u8, frame.len - 1);
+    defer alloc.free(short);
+    @memcpy(short, frame[0..short.len]);
+    std.mem.writeInt(u32, short[0..][0..4], @intCast(short.len - 4), .little);
+    try testing.expectError(error.Malformed, decodeAlloc(alloc, short));
 }
