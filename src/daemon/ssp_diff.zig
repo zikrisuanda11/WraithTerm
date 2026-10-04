@@ -442,3 +442,303 @@ fn runDiffScenario(alloc: Allocator, io: std.Io, seed: u64, loss: f32) !void {
         }
     }
 }
+
+// P4.10 acceptance: long endurance — big styled output, a resize
+// each way (via snapshot resync), a simulated 30 s gap, all under
+// 30% loss + jitter + dup. 20 seeds; final screens identical.
+test "diff: endurance 20 seeds" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var s: usize = 0;
+    while (s < 20) : (s += 1) {
+        try runEnduranceScenario(alloc, testing.io, 0xE000 + s);
+    }
+}
+
+fn runEnduranceScenario(alloc: Allocator, io: std.Io, seed: u64) !void {
+    const testing = std.testing;
+    const Headless = @import("../terminal/headless_proto.zig").Headless;
+    var srv_h = try Headless.init(alloc, 40, 12);
+    defer srv_h.deinit();
+    var cli_h = try Headless.init(alloc, 40, 12);
+    defer cli_h.deinit();
+
+    var lb = link.Loopback.init(alloc);
+    defer lb.deinit();
+    var up = link.LossyLink.init(alloc, lb.endpoint(.a), seed, .{
+        .loss = 0.30,
+        .duplicate = 0.05,
+        .delay_ns = 5_000_000,
+        .delay_jitter_ns = 20_000_000,
+        .reorder = 0.05,
+    });
+    defer up.deinit();
+    var down = link.LossyLink.init(alloc, lb.endpoint(.b), seed ^ 0x5EED, .{});
+    defer down.deinit();
+    const srv_tx = up.transport();
+    const cli_rx = down.transport();
+    const cli_tx = down.transport();
+    const srv_rx = up.transport();
+
+    const key: [crypto.key_length]u8 = .{0x4A} ** crypto.key_length;
+    var s_seal = crypto.Sealer{ .key = key, .dir = .server_to_client };
+    var c_open = crypto.Opener{ .key = key, .dir = .server_to_client };
+    var c_seal = crypto.Sealer{ .key = key, .dir = .client_to_server };
+    var s_open = crypto.Opener{ .key = key, .dir = .client_to_server };
+    var re = frag.Reassembler.init(alloc);
+    defer re.deinit();
+
+    const Cx = struct {
+        srv_tx: link.Transport,
+        cli_rx: link.Transport,
+        cli_tx: link.Transport,
+        srv_rx: link.Transport,
+        up: *link.LossyLink,
+        down: *link.LossyLink,
+        s_seal: *crypto.Sealer,
+        c_open: *crypto.Opener,
+        c_seal: *crypto.Sealer,
+        s_open: *crypto.Opener,
+        re: *frag.Reassembler,
+        alloc: Allocator,
+        rbuf: [link.max_datagram]u8 = undefined,
+        obuf: [link.max_datagram]u8 = undefined,
+
+        fn pumpAll(c: *@This()) void {
+            c.up.advance(25_000_000);
+            c.down.advance(25_000_000);
+            c.up.pump();
+            c.down.pump();
+        }
+
+        fn sendDiff(c: *@This(), srv: *DiffServer, term: *Terminal) !void {
+            if (try srv.makeDiff(term)) |d| {
+                defer c.alloc.free(d.wire);
+                var pkt: [link.max_datagram]u8 = undefined;
+                const sealed = try c.s_seal.seal(&pkt, d.wire, 0);
+                try c.srv_tx.send(sealed);
+            }
+        }
+
+        fn drainClient(c: *@This(), cli: *DiffClient) !?u32 {
+            var ack: ?u32 = null;
+            var n: usize = 0;
+            while (n < 128) : (n += 1) {
+                const dg = c.cli_rx.recv(&c.rbuf, 0) catch break;
+                const plain = c.c_open.open(&c.obuf, dg) catch continue;
+                if (try cli.applyFrame(c.alloc, plain)) |st| ack = st;
+            }
+            return ack;
+        }
+
+        fn sendAck(c: *@This(), ack: u32) !void {
+            var abuf: [64]u8 = undefined;
+            var tmp: [8]u8 = undefined;
+            std.mem.writeInt(u32, tmp[0..4], ack, .little);
+            std.mem.writeInt(u32, tmp[4..8], 0, .little);
+            const sealed = try c.c_seal.seal(&abuf, &tmp, 0);
+            try c.cli_tx.send(sealed);
+        }
+
+        fn drainServer(c: *@This(), srv: *DiffServer, feed: *HeadlessFeed) !void {
+            var m: usize = 0;
+            while (m < 32) : (m += 1) {
+                const dg = c.srv_rx.recv(&c.rbuf, 0) catch break;
+                const plain = c.s_open.open(&c.obuf, dg) catch continue;
+                if (plain.len < 4) continue;
+                try srv.onAck(std.mem.readInt(u32, plain[0..4], .little), feed);
+            }
+        }
+
+        fn resendUnacked(c: *@This(), srv: *DiffServer) !void {
+            const resend = try srv.unacked(c.alloc);
+            defer c.alloc.free(resend);
+            for (resend) |frame| {
+                var pkt: [link.max_datagram]u8 = undefined;
+                const sealed = try c.s_seal.seal(&pkt, frame, 0);
+                try c.srv_tx.send(sealed);
+            }
+            c.up.pump();
+            c.down.pump();
+        }
+
+        fn stepDiffs(c: *@This(), srv: *DiffServer, cli: *DiffClient, srv_term: *Terminal) !void {
+            try c.sendDiff(srv, srv_term);
+            c.pumpAll();
+            if (try c.drainClient(cli)) |a| try c.sendAck(a);
+            c.up.pump();
+            c.down.pump();
+        }
+
+        fn settle(c: *@This(), srv: *DiffServer, feed: *HeadlessFeed, cli: *DiffClient) !void {
+            var i: usize = 0;
+            while (cli.current != srv.next -% 1 and i < 60) : (i += 1) {
+                c.pumpAll();
+                if (try c.drainClient(cli)) |a| try c.sendAck(a);
+                c.up.pump();
+                c.down.pump();
+                try c.drainServer(srv, feed);
+                try c.resendUnacked(srv);
+                c.up.pump();
+                c.down.pump();
+            }
+        }
+
+        /// Snapshot resync after a resize: the server snapshots at
+        /// `state`; the client restores into its live terminal slot;
+        /// both diff sides rebase to `state`. Sealed-fragment
+        /// transport with resend rounds (same reliability as diffs).
+        fn resync(
+            c: *@This(),
+            io: std.Io,
+            srv_term: *Terminal,
+            state: u32,
+            srv: *DiffServer,
+            cli: *DiffClient,
+            cli_term_slot: *Terminal,
+            shadow_feed: *HeadlessFeed,
+            cli_feed: *HeadlessFeed,
+        ) !void {
+            var msg_id: u32 = 9000 +% state;
+            var round: usize = 0;
+            var done = false;
+            while (!done and round < 30) : (round += 1) {
+                try sync.sendSnapshot(c.alloc, c.srv_tx, c.s_seal, srv_term, state, msg_id);
+                msg_id +%= 1;
+                var step: usize = 0;
+                while (step < 200 and !done) : (step += 1) {
+                    c.pumpAll();
+                    while (c.cli_rx.recv(&c.rbuf, 0)) |dg| {
+                        const plain = c.c_open.open(&c.obuf, dg) catch continue;
+                        if (try c.re.feed(plain, c.down.now_ns)) |blob| {
+                            defer c.alloc.free(blob);
+                            const msgs = try sync.splitFrames(c.alloc, blob);
+                            defer c.alloc.free(msgs);
+                            var payloads: std.ArrayList([]const u8) = .empty;
+                            defer payloads.deinit(c.alloc);
+                            for (msgs) |m| {
+                                if (m != .snapshot) continue;
+                                try payloads.append(c.alloc, m.snapshot.payload);
+                            }
+                            if (payloads.items.len == 0) continue;
+                            var decoded = try snapshot.restore(c.alloc, io, payloads.items, 1024);
+                            defer decoded.deinit(c.alloc);
+                            var t = try decoded.toOwned();
+                            errdefer t.deinit(c.alloc);
+                            // Swap into the live slot (same address, so
+                            // the client's stream stays bound).
+                            cli_term_slot.deinit(c.alloc);
+                            cli_term_slot.* = t;
+                            done = true;
+                            break;
+                        }
+                    } else |_| {}
+                    _ = c.re.sweep(c.down.now_ns);
+                }
+            }
+            if (!done) return error.Incomplete;
+            // Rebase both diff sides to the snapshot state.
+            srv.deinit();
+            srv.* = try DiffServer.init(c.alloc, io, srv_term, state);
+            shadow_feed.* = HeadlessFeed.init(c.alloc, &srv.shadow);
+            cli_feed.* = HeadlessFeed.init(c.alloc, cli_term_slot);
+            cli.feed = cli_feed.*;
+            cli.current = state;
+        }
+    };
+
+    var cx = Cx{
+        .srv_tx = srv_tx,
+        .cli_rx = cli_rx,
+        .cli_tx = cli_tx,
+        .srv_rx = srv_rx,
+        .up = &up,
+        .down = &down,
+        .s_seal = &s_seal,
+        .c_open = &c_open,
+        .c_seal = &c_seal,
+        .s_open = &s_open,
+        .re = &re,
+        .alloc = alloc,
+    };
+
+    var srv = try DiffServer.init(alloc, io, srv_h.term, 100);
+    defer srv.deinit();
+    var shadow_feed = HeadlessFeed.init(alloc, &srv.shadow);
+    var cli_feed = HeadlessFeed.init(alloc, cli_h.term);
+    var cli = DiffClient{ .current = 100, .feed = cli_feed };
+
+    // Phase 1: big styled output (60 lines → scrollback churn).
+    var step: usize = 0;
+    while (step < 6) : (step += 1) {
+        var line: [96]u8 = undefined;
+        var k: usize = 0;
+        while (k < 10) : (k += 1) {
+            const text = try std.fmt.bufPrint(
+                &line,
+                "\x1b[1;3{d};4{d}mblk{d}-{d}\x1b[0m ",
+                .{ step % 7 + 1, (step + k) % 7 + 1, step, k },
+            );
+            srv_h.feed(text);
+        }
+        srv_h.feed("\r\n");
+        try cx.stepDiffs(&srv, &cli, srv_h.term);
+    }
+    try cx.settle(&srv, &shadow_feed, &cli);
+
+    // Phase 2: resize 40x12 → 80x24 via snapshot resync.
+    const snap_state: u32 = srv.next;
+    try srv_h.term.resize(alloc, .{ .cols = 80, .rows = 24 });
+    try cx.resync(io, srv_h.term, snap_state, &srv, &cli, cli_h.term, &shadow_feed, &cli_feed);
+    try cx.settle(&srv, &shadow_feed, &cli);
+
+    // Phase 3: more output on the new size.
+    step = 0;
+    while (step < 4) : (step += 1) {
+        var line: [96]u8 = undefined;
+        const text = try std.fmt.bufPrint(
+            &line,
+            "\x1b[38;5;{d}mwide-{d}\x1b[0m\r\n",
+            .{ 100 + step * 10, step },
+        );
+        srv_h.feed(text);
+        try cx.stepDiffs(&srv, &cli, srv_h.term);
+    }
+    try cx.settle(&srv, &shadow_feed, &cli);
+
+    // Phase 4: simulated 30 s sleep gap (clocks advance, no traffic).
+    up.advance(30 * std.time.ns_per_s);
+    down.advance(30 * std.time.ns_per_s);
+    up.pump();
+    down.pump();
+
+    // Phase 5: output after the gap (recovery proof).
+    step = 0;
+    while (step < 4) : (step += 1) {
+        var line: [64]u8 = undefined;
+        const text = try std.fmt.bufPrint(&line, "postgap-{d}\r\n", .{step});
+        srv_h.feed(text);
+        try cx.stepDiffs(&srv, &cli, srv_h.term);
+    }
+    try cx.settle(&srv, &shadow_feed, &cli);
+
+    // Phase 6: resize back 80x24 → 40x12 via snapshot resync.
+    const snap_state2: u32 = srv.next;
+    try srv_h.term.resize(alloc, .{ .cols = 40, .rows = 12 });
+    try cx.resync(io, srv_h.term, snap_state2, &srv, &cli, cli_h.term, &shadow_feed, &cli_feed);
+    try cx.settle(&srv, &shadow_feed, &cli);
+
+    try testing.expectEqual(srv.next -% 1, cli.current);
+    try testing.expectEqual(srv_h.term.cols, cli_h.term.cols);
+    try testing.expectEqual(srv_h.term.rows, cli_h.term.rows);
+    var y: u16 = 0;
+    while (y < srv_h.term.rows) : (y += 1) {
+        var x: u16 = 0;
+        while (x < srv_h.term.cols) : (x += 1) {
+            try testing.expect(cellsEqual(
+                getCell(srv_h.term, x, y),
+                getCell(cli_h.term, x, y),
+            ));
+        }
+    }
+}
