@@ -50,4 +50,5 @@ test {
     _ = @import("daemon/harness_bridge.zig");
     _ = @import("daemon/harness_install.zig");
     _ = @import("daemon/harness_list.zig");
+    _ = @import("daemon/harness_notify.zig");
 }

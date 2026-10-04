@@ -21,6 +21,7 @@ const sock = @import("socket.zig");
 const harness = @import("harness_sock.zig");
 const detect = @import("harness_detect.zig");
 const hevent = @import("harness_event.zig");
+const notify = @import("harness_notify.zig");
 
 /// A live session: metadata in `Manager`, owned PTY + optional
 /// active client connection here.
@@ -169,11 +170,20 @@ pub const Server = struct {
 
     /// Apply one bridge event to its session. Events without a
     /// parseable `session_id`, or for unknown sessions, are dropped.
+    /// Entry into `awaiting_approval` fires a best-effort OS
+    /// notification (P2.8: edge-triggered, never blocking).
     pub fn ingestHarnessEvent(self: *Server, ev: hevent.Event) void {
         if (ev.session_id.len == 0) return;
         const id = SessionId.parse(ev.session_id) catch return;
         if (self.live.getPtr(id.bytes)) |ls| {
+            const prev = ls.harness.state;
             ls.harness.apply(ev);
+            if (notify.shouldNotify(prev, ev.state)) {
+                var title_buf: [128]u8 = undefined;
+                var body_buf: [256]u8 = undefined;
+                const m = notify.message(ev.session_id, ev.tool, &title_buf, &body_buf);
+                notify.send(self.io, self.alloc, m.title, m.body);
+            }
         }
     }
 
