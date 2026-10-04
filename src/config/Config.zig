@@ -3963,6 +3963,14 @@ term: []const u8 = "xterm-ghostty",
 /// control socket is missing, so the first command just works.
 @"wraith-daemon": WraithDaemon = .off,
 
+/// Where pasted images are delivered (D1/P3.2).
+///
+/// `off` keeps stock Ghostty behavior: image clipboard data is
+/// ignored on paste. A directory path enables it: pasted images are
+/// stored under that directory (managed per D1: quota, TTL) and the
+/// shell-quoted absolute path is bracketed-pasted to the PTY.
+@"wraith-image-paste": WraithImagePaste = .off,
+
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,
 
@@ -5511,6 +5519,38 @@ pub const LinkPreviews = enum {
 pub const WraithDaemon = enum {
     off,
     auto,
+};
+
+/// See `wraith-image-paste`
+pub const WraithImagePaste = union(enum) {
+    const Self = @This();
+
+    /// Stock behavior: image data on paste is ignored.
+    off,
+
+    /// Store under this directory and bracketed-paste the path.
+    path: []const u8,
+
+    pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
+        var input = input_ orelse return error.ValueRequired;
+        input = std.mem.trim(u8, input, &std.ascii.whitespace);
+        if (input.len == 0) return error.ValueRequired;
+        if (input.len >= 2 and input[0] == '"' and input[input.len - 1] == '"') {
+            input = input[1 .. input.len - 1];
+        }
+        if (std.mem.eql(u8, input, "off")) {
+            self.* = .off;
+            return;
+        }
+        self.* = .{ .path = try alloc.dupe(u8, input) };
+    }
+
+    pub fn formatEntry(self: Self, formatter: formatterpkg.EntryFormatter) !void {
+        switch (self) {
+            .off => try formatter.formatEntry([]const u8, "off"),
+            .path => |path| try formatter.formatEntry([]const u8, path),
+        }
+    }
 };
 
 /// See working-directory
