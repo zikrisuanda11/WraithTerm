@@ -42,4 +42,6 @@ test {
     _ = @import("daemon/pty.zig");
     _ = @import("daemon/snapshot.zig");
     _ = @import("daemon/socket.zig");
+    _ = @import("daemon/server.zig");
+    _ = @import("daemon/client.zig");
 }
