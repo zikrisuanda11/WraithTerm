@@ -55,7 +55,7 @@ Setiap pesan pada Unix socket:
 u16  protocol_version_min
 u16  protocol_version_max
 u16  capabilities        // bitmask, §5
-u8   role                // 0=client, 1=daemon/server
+u8   role                // 0=client, 1=daemon/server, 2=cli (kontrol saja, §4.11)
 u16  id_len
 u8   id[id_len]          // session ID (8 hex) atau kosong untuk daemon
 ```
@@ -229,7 +229,10 @@ client                         daemon
 ```
 - Attach baru → daemon mengirim `Detached(taken_over)` ke client lama lalu `Snapshot` ke yang baru (AC1.4).
 - Tidak ada `SIGHUP` ke child saat client lepas (AC1.1) — daemon mempertahankan PTY.
-
+- Koneksi `role=cli` (P1.8): tanpa create/attach/snapshot — hanya `Control` +
+  balasan (`SessionList`, `HarnessList`, `Ack`). Dipakai `+list-sessions`, `+kill`, `+list-harnesses`.
+- Daemon keluar sendiri bila tanpa session 10 detik **dan** dijalankan dengan
+  `--exit-when-empty` (D8); CLI memicu start on-demand bila `wraith-daemon=auto`.
 ### 6.2 SSP remote (bootstrap D2)
 ```
 klien                              server (wraith --remote-server)
@@ -250,7 +253,13 @@ klien                              server (wraith --remote-server)
 - **Replay window**: jendela geser 1024 paket per arah; tolak seq di luar jendela atau yang sudah terlihat.
 - Paket gagal otentikasi **dibuang diam-diam** (tanpa balasan), mencegah oracle.
 - Paket SSP ≤ 1200 byte. Payload lebih besar → fragmentasi (`chunk_index`/`chunk_count` di dalam AEAD), reassembly timeout 5 detik, batas total 4 MiB (D9). Melebihi batas → buang fragmen (bukan crash).
+- **Anggaran plaintext**: chunk terenkripsi = header kripto (9 B) + tag (16 B) + plaintext; plaintext per datagram ≤ 1175 B agar hasil seal muat 1200 B (kelebihan dibuang transport — P4.4).
 - Tanpa key rotation di v1; session baru = kunci baru. Tidak memakai Noise di v1.
+
+## 7.1 Diff bernomor-state + ack (P4.5)
+- Diff = baris berubah sebagai tulisan VT ber-alamat kursor (SGR diawetkan lewat parser klien); satu pesan `Diff` per state, `base → state`.
+- Klien terapkan hanya bila `base == current`, lalu ack state baru; duplikat/gap dibuang. Server menyimpan yang belum diack untuk retransmit (ack kumulatif).
+- Resize tak dibawa diff (tanpa geometri) → snapshot-ulang + rebase kedua sisi (P4.10).
 
 ## 8. Roaming (AC2.4)
 - Alamat peer diperbarui **hanya** dari paket terotentikasi AEAD dengan seq lebih tinggi. Paket lama/replay dari alamat lain tidak boleh membajak.
