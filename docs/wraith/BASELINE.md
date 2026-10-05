@@ -86,4 +86,36 @@ Kesimpulan: **tidak ada regresi >5%** pada beban kerja nyata
 operasi-kecil yang didominasi startup proses; modul daemon ter-link
 tapi tak pernah dieksekusi bench.
 
+## P5.1 Regression (2026-10-05, commit `d1aac9253`)
+
+Metode sama: test binary langsung + bench `date`-timed 3x, korpus
+`ghostty-gen +styled` default 640000 B (sha256 `a4b25b12…02c8e8`).
+
+| Metrik | P0.5 | P1.9 | P5.1 | Putusan |
+|---|---|---|---|---|
+| Test binary exit | 0 | 0 | 0 | hijau |
+| Lulus / total | 3881 / 3921 | 3910 / 3950 | 3976 / 4016 | +66 test (Fase 2–4), 0 gagal |
+| Skip / gagal | 40 / 0 | 40 / 0 | 40 / 0 | sama |
+| Durasi wall | ±398 dtk | ±403 dtk | ±479 dtk | +20%: suite +95 test (fuzz 1M + e2e 20-seed), bukan regresi |
+| formatter noop | 0.015 s | 0.018–0.019 s | 0.022–0.030 s | overhead startup tumbuh (+9 ms sejak P0.5) |
+| formatter format | 0.069 s | 0.068–0.070 s | 0.073–0.074 s | mentah +6%; bersih −noop: 54→50→50 ms, datar |
+| parser | 0.028 s | 0.023–0.024 s | 0.027 s | setara |
+| snapshot encode | 0.017 s | 0.019–0.020 s | 0.024 s | kecil absolut (+7 ms, startup) |
+| resize | 0.244 s | 0.245–0.252 s | 0.247–0.256 s | +1–2%, setara (bersih −noop: 229→227→225) |
+| stream | 0.013 s | 0.015–0.016 s | 0.019–0.020 s | kecil absolut (startup) |
+
+Kesimpulan: **tidak ada regresi >5% pada beban kerja.** Mentah,
+`format` naik 69→73.5 ms (+6.5%), tetapi bench `noop` (murni overhead
+startup, tanpa kerja terminal) naik 15→24 ms pada periode yang sama:
+kerja format bersih (`format−noop`) = 54→50→50 ms, datar. Kenaikan
+wall murni biaya startup proses satu-kali (binary membesar dengan
+modul Fase 2–4 yang ter-link tapi tak dieksekusi bench), bukan
+kemunduran per-frame.
+
+Temuan P5.1 (diperbaiki): aksi HUD baru menggeser ordinal enum
+`apprt Action.Key` vs `ghostty.h` → test paritas C ABI gagal.
+Perbaikan: varian di-append di ujung enum Zig + konstanta di ujung
+enum C (`GHOSTTY_ACTION_TOGGLE_HARNESS_HUD`); aturan append-only
+didokumentasikan di varian.
+
 ## Catatan

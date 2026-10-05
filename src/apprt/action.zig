@@ -118,9 +118,6 @@ pub const Action = union(Key) {
     /// Toggle the command palette.
     toggle_command_palette,
 
-    /// Toggle the WraithTerm harness HUD (native dialog).
-    toggle_harness_hud,
-
     /// Toggle the visibility of all Ghostty terminal windows.
     toggle_visibility,
 
@@ -367,6 +364,10 @@ pub const Action = union(Key) {
     /// split or the window is fullscreen.
     resize_window: ResizeWindow,
 
+    /// Toggle the WraithTerm harness HUD (native dialog).
+    /// Last: union order must match the `Key` enum (C ABI frozen).
+    toggle_harness_hud,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -381,7 +382,6 @@ pub const Action = union(Key) {
         toggle_window_decorations,
         toggle_quick_terminal,
         toggle_command_palette,
-        toggle_harness_hud,
         toggle_visibility,
         toggle_background_opacity,
         move_tab,
@@ -440,6 +440,10 @@ pub const Action = union(Key) {
         copy_title_to_clipboard,
         move_tab_to_new_window,
         resize_window,
+
+        /// Toggle the WraithTerm harness HUD (native dialog).
+        /// Appended last: C ABI ordinals of existing actions are frozen.
+        toggle_harness_hud,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");

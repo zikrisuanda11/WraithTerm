@@ -69,7 +69,7 @@ Aturan iterasi: kerjakan SATU task `[ ]` pertama (dari atas) yang seluruh depend
 - **Phase gate P4:** build + semua test hijau. Merge ke `wraith/dev`.
 
 ## Phase 5 — Finalisasi
-- [ ] **P5.1** ← semua fase Regression penuh: seluruh test Ghostty lama + baru; benchmark vs baseline. *Selesai bila:* hasil dicatat.
+- [x] **P5.1** ← semua fase Regression penuh: seluruh test Ghostty lama + baru; benchmark vs baseline. *Selesai bila:* hasil dicatat. *(selesai 2026-10-05: suite via binary langsung EXIT=0 — 3976 lulus / 40 skip / 0 gagal (±479 dtk); bench: format−noop datar 54→50ms, resize−noop 229→225ms — nihil regresi >5% (mentah +6.5% = overhead startup); 1 temuan: ordinal Action.Key vs ghostty.h → append-only diperbaiki; dicatat BASELINE.md §P5.1)*
 - [ ] **P5.2** ← P5.1 Selesaikan `ARCHITECTURE.md`, perbarui `PROTOCOL.md` sesuai implementasi akhir, tambah bagian "WraithTerm" singkat di dokumentasi (cara aktifkan tiap fitur, config keys). *Selesai bila:* dokumen konsisten dengan kode.
 - [ ] **P5.3** ← P5.1 Kompilasi `NEEDS_HUMAN_VERIFICATION.md` dari semua task `[~]` (langkah verifikasi manual yang dapat diulang) dan audit `BLOCKERS.md` dari semua `[!]`. *Selesai bila:* tiap `[~]`/`[!]` punya entri.
 - [ ] **P5.4** ← P5.2, P5.3 Tulis `FINAL_REPORT.md`; merge final ke `wraith/dev`; tulis `WRAITH_DONE` (§2.6).
